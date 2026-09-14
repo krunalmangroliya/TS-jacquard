@@ -1,0 +1,15 @@
+# Black-and-gold artwork import
+
+The upload form asks **Which colors are in your image?** with Black & White selected initially and Black & Gold available after upload. Changing the choice invalidates the previous trace. The selected mode is retained in the optional `traceParams.inputMode` field; older documents without it remain valid.
+
+Black & White uses the existing centerline tracing and measured source stroke widths. Black & Gold treats bright artwork as foreground against a dark ground. Alpha is composited onto dark ground, and automatic luminance separation retains pale highlights as well as saturated gold. The original PNG is stored unchanged. A separate palette for the imported master sets dark ground and a gold color while retaining at most six entries; workspace defaults are unchanged.
+
+The supplied `sample-1-GB.png` contains broad gold petals with fine dark engraving. Centerline tracing with a constant median width for each edge merged those details. Gold import therefore traces closed pixel boundaries and assigns gold or ground fills from the source mask. Its boundary nodes remain editable. Boundary strokes start at zero width, so no extra outline thickens the artwork. A user can add an outline later; hiding an outline preserves the independently editable fill.
+
+Balanced and Smooth gold imports cap boundary simplification at one source pixel. Keep fine detail uses 0.6 pixel. Speck cleanup is capped at four source pixels, and automatic gap joins and spur pruning are not applied to filled contours. Metallic shading is represented by one gold palette entry.
+
+The full 3072 × 4096 supplied image produced 7,781 contours, 180,939 nodes and 8,250 regions. Against the extracted source ink at the original resolution, the final vector render had 95.95% intersection over union: 1.93% of gold ink was missed and 2.21% extra gold was introduced. The tested centerline alternative reached 78.91%. A 0.75 pixel contour trial reached 97.93% but required 318,479 nodes; the one-pixel limit was selected to reduce the document and editing cost while retaining the engraved pattern. These figures compare the indexed trace with its source mask; they do not measure loom or external software compatibility.
+
+On the development PC, the selected full-image contour run took about 2.82 seconds to trace, 4.64 seconds to build topology and 1.38 seconds to render at source resolution. The master is approximately 17 MB. Browser testing imported the complete source twice to verify mode changes, saved and opened the result, checked the retained original PNG byte for byte, and then imported the existing black-and-white square. No browser errors were observed.
+
+Reproduce the source comparison with `node node_modules/tsx/dist/cli.mjs scripts/test-gold-import.ts`. Use `--skeleton` for the measured alternative. Run `scripts/test-gold-import-ui.ts --full` through the same runner for the isolated browser test; its temporary store does not open the user's library. Review artifacts are written under `output/gb-import`.

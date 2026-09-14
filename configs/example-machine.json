@@ -1,0 +1,8 @@
+{
+  "id": "placeholder-2400",
+  "name": "Example 2400 hooks / 60 EPI / 48 PPI — verify before production",
+  "hooks": 2400,
+  "epi": 60,
+  "ppi": 48,
+  "notes": "Placeholder from JDM_SPEC_v1. Replace with a real machine profile."
+}

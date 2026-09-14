@@ -1,0 +1,7 @@
+{
+  "kind": "Synthetic regression fixtures only; customer and NedGraphics acceptance pending",
+  "reason": "User approved maximum six colors and visible per-edge source-proportional strokes; geometry invariance and browser equivalence verified",
+  "createdAt": "2026-09-12T11:24:11.157Z",
+  "cases": 10,
+  "sizesPerCase": 3
+}

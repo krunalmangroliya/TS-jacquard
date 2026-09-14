@@ -1,0 +1,7 @@
+{
+  "minRegionPx": 4,
+  "minThicknessPx": 0,
+  "removeCheckerboard": true,
+  "connectVisibleEdges4": true,
+  "protectedColorIndices": []
+}

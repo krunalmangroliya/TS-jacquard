@@ -1,0 +1,40 @@
+{
+  "name": "jdm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "scripts": {
+    "jdm": "tsx packages/eval/src/cli.ts",
+    "sample": "tsx packages/eval/src/cli.ts sample",
+    "eval": "tsx packages/eval/src/eval.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "tsx scripts/build.ts",
+    "start": "node apps/server/dist/main.mjs",
+    "dev": "pnpm --filter @jdm/web dev",
+    "test:product": "tsx scripts/product-smoke.ts",
+    "test:recovery": "tsx scripts/test-editor-recovery.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "@vitejs/plugin-react": "5.0.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.55.0",
+    "pngjs": "^7.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "7.1.0",
+    "vitest": "^3.2.0",
+    "zod": "^3.25.0"
+  },
+  "dependencies": {
+    "@fastify/static": "8.3.0",
+    "fastify": "5.6.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  }
+}

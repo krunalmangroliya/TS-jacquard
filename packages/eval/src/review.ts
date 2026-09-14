@@ -1,0 +1,39 @@
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import type { Face, Master, TraceReport, RenderReport } from '../../core/src/types';
+import { flattenEdge } from '../../core/src/topology';
+import { escapeHtml } from './io';
+export interface ReviewOutput { stem:string; widthPx:number; heightPx:number; widthIn:number; heightIn:number; report:Pick<RenderReport,'changedPixelsByRule'|'colorsUsed'|'smallFacesRemoved'|'warnings'> }
+export function masterSvg(master: Master, faces: Face[], source?: Buffer): string {
+  const { w, h } = master.bounds;
+  const polygons = faces.filter(f => f.outer).sort((a,b) => b.areaDu - a.areaDu || (a.id < b.id ? -1 : 1)).map(face => {
+    const rings = [face.outer!, ...face.holes];
+    const d = rings.map(ring => `M${ring.map(p => `${p.x},${p.y}`).join('L')}Z`).join('');
+    const color = master.palette.entries[master.geometry.faceColors[face.id]?.colorIndex ?? 0].displayRgb;
+    return `<path d="${d}" fill="rgb(${color.join(',')})" fill-rule="evenodd"/>`;
+  }).join('');
+  const edges = Object.values(master.geometry.edges).filter(edge=>source||(!edge.strokeHidden&&edge.width>0)).map(edge => {
+    const points = flattenEdge(edge, master.geometry, 0.25);
+    const color=source?'#007f9d':`rgb(${master.palette.entries[edge.colorIndex??0].displayRgb.join(',')})`;
+    const width=source?Math.max(w,h)/700:edge.width;
+    return `<path d="M${points.map(p => `${p.x},${p.y}`).join('L')}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><rect width="${w}" height="${h}" fill="white"/>${source ? `<image width="${w}" height="${h}" href="data:image/png;base64,${source.toString('base64')}"/>${edges}` : polygons+edges}</svg>`;
+}
+export async function writeReview(directory: string, master: Master, trace: TraceReport, outputs: ReviewOutput[], isGenerated: boolean, hasStrokeEditor=false): Promise<void> {
+  const e = escapeHtml;
+  const cards = outputs.map((r,i) => {
+    const name = path.basename(r.stem), count = Object.values(r.report.changedPixelsByRule).reduce((sum,n) => sum+n,0);
+    return `<article class="size"><div class="eyebrow">${['Small','Medium','Large'][i] ?? 'Size'} / ${r.widthPx} × ${r.heightPx}</div><div class="pixel-frame"><img class="pixels" src="${e(name)}.png" style="width:min(100%, ${380*r.widthIn/r.heightIn}px);aspect-ratio:${r.widthIn}/${r.heightIn}" alt="Indexed output ${r.widthPx} by ${r.heightPx}"/></div><div class="dimensions">${r.widthIn.toFixed(2)} × ${r.heightIn.toFixed(2)} inches</div><p>${count} rule changes · ${r.report.colorsUsed.length} colors · ${r.report.smallFacesRemoved.length} regions with omitted details</p><details><summary>Show pixels touched by cleanup</summary><img class="mask" src="${e(name)}.changes.png" alt="Red pixels mark cleanup edits"/></details><div class="links"><a href="${e(name)}.bmp">BMP</a><a href="${e(name)}.png">PNG</a><a href="${e(name)}.json">Report</a></div>${r.report.warnings.length ? `<details><summary>${r.report.warnings.length} warnings</summary><ul>${r.report.warnings.map(w=>`<li>${e(w)}</li>`).join('')}</ul></details>` : ''}</article>`;
+  }).join('');
+  const html = `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>JDM review — ${e(master.name)}</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#f3f0e9;color:#28342f;font:15px/1.55 system-ui,sans-serif}main{max-width:1320px;margin:auto;padding:48px 32px}header{border-bottom:1px solid #bbc6bc;padding-bottom:26px;display:flex;justify-content:space-between;gap:24px;align-items:end}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:#597667}h1{font-family:Georgia,serif;font-size:46px;font-weight:400;line-height:1.1;margin:12px 0}p{color:#57665e;margin:10px 0}a{color:#275744;text-underline-offset:4px}.badge{background:#dce6d8;border-radius:30px;padding:8px 14px;white-space:nowrap}.notice{padding:15px 20px;margin:24px 0;background:#fff7de;border-left:3px solid #a88538}.sources{display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;margin:28px 0}.source,.size{background:#fff;padding:20px;border:1px solid #e1e3dc;border-radius:4px}.source img{width:100%;height:300px;object-fit:contain;background:white}.source h2{font-size:15px;margin:12px 0 0}.stats{display:flex;gap:30px;flex-wrap:wrap;margin:28px 0}.stats b{font-size:28px;font-weight:500;display:block}.stats span{font-size:12px;color:#657469}.sizes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}.pixel-frame{display:flex;align-items:center;justify-content:center;min-height:310px;margin:15px 0;background:#f9f9f6}.pixels{width:100%;height:auto;object-fit:fill;image-rendering:pixelated}.dimensions{font-size:18px;font-weight:600}.size p{font-size:12px}.links{display:flex;gap:18px;padding:12px 0;border-top:1px solid #e2e7df;margin-top:16px}.mask{width:100%;image-rendering:pixelated;background:white}summary{cursor:pointer;font-size:12px;margin-top:10px}li{margin-bottom:6px}footer{font-size:12px;color:#6e7b71;border-top:1px solid #c6cec5;margin-top:36px;padding-top:18px}@media(max-width:850px){main{padding:24px 16px}.sources,.sizes{grid-template-columns:1fr}header{align-items:start;flex-direction:column}h1{font-size:34px}.source img{height:280px}}
+  </style><main><header><div><div class="eyebrow">Jacquard Design Master / Core trial</div><h1>${e(master.name)}</h1><p>One vector master. Three loom sizes. Inspect the details.</p></div><div class="badge">${isGenerated ? 'AI-generated test reference' : 'Customer sample · test colors'}</div></header>
+  <div class="notice"><b>Development preview.</b> Colors are assigned as test placeholders; they are not yarn or weave assignments. The machine profile is an unverified example. These outputs have not been accepted in NedGraphics. Cleanup change counts do not measure time saved. ${master.repeat.type==='none'?'This is a panel trial: opposite borders are not joined or treated as a seamless repeat.':''}</div>
+  <section class="sources"><article class="source"><img src="source.png" alt="Original input"/><h2>01 / Input</h2><p>Original PNG, shown on white.</p></article><article class="source"><img src="trace-overlay.svg" alt="Traced curves on source"/><h2>02 / Trace check</h2><p>Cyan curves over the source drawing.</p></article><article class="source"><img src="master.svg" alt="Vector master with placeholder colors"/><h2>03 / Reusable master</h2><p>Display colors. Pixel outputs use the export palette.</p></article></section>
+  <section class="stats"><div><b>${trace.nodes}</b><span>EDITABLE NODES</span></div><div><b>${trace.edges}</b><span>EDGES</span></div><div><b>${trace.faces}</b><span>ENCLOSED REGIONS</span></div><div><b>${trace.openEnds.length}</b><span>OPEN ENDS / MAY INCLUDE DECORATION</span></div><div><b>${trace.autoClosed.length}</b><span>AUTOMATIC GAP JOINS</span></div></section>
+  <div class="eyebrow">Loom output / pixels displayed in physical proportion</div><section class="sizes">${cards}</section>
+  <details><summary>Import notes (${trace.warnings.length})</summary><ul>${trace.warnings.map(w=>`<li>${e(w)}</li>`).join('')}</ul></details>
+  <footer><a href="master.json">Download vector master</a> · <a href="trace-report.json">Trace report</a><p>Small-size cleanup affects the exported size only. The master retains its geometry. Compare motif shape and all fine details before production.</p></footer></main></html>`;
+  await writeFile(path.join(directory,'review.html'),hasStrokeEditor?html.replace('<footer>','<footer><p><a href="stroke-editor.html">Open stroke editor — select, hide and restore lines</a></p>'):html);
+}

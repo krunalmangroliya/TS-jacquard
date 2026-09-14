@@ -1,0 +1,13 @@
+# Interactive editor and Black & Gold input
+
+The owner reported unacceptable delays during node editing and requested a Black & Gold upload choice for `sample-1-GB.png`.
+
+The old sample required roughly 10.6 seconds for a complete node operation. Exact topology boundary queries and splitting work were reduced while preserving dense geometry, face, pixel and report hashes. Node/handle changes, drawing and deletion now commit separately from topology and raster processing. The browser keeps a live local deformation of curves and neighboring fills, retains it across pointer release, and permits subsequent quick operations while a cancellable worker settles the newest geometry.
+
+Pending actions remain durable before worker dispatch. Save, retained versions and export wait for the latest settlement. Undo/redo retain face assignments across merging and splitting regions. Palette merge retains a geometry barrier; large transforms/duplicates retain full fill-transfer behavior. Version-remount lock acquisition now waits for an earlier release so a delayed release cannot remove a newly acquired same-page lock.
+
+Full-app profiling also found a main-thread copy bottleneck beyond canvas drawing. Commit replies now carry sparse patches instead of a complete graph; node-table copies yield to input, and optimistic edits compute on a small incident subgraph. Recovery snapshots are written to IndexedDB inside the editor worker. Exact settlement sends face assignments and render data, while save barriers return a small ordered acknowledgement. Initial opening still loads the full document.
+
+Black & Gold mode extracts bright artwork from dark ground, then traces closed filled contours. A centerline-only experiment merged important engraved details, so it was rejected. Balanced contour simplification is bounded to one source pixel, with a tighter Fine option. The full sample retains 95.95% overlap with the extracted ink using 180,939 nodes and 7,781 contours. Metallic shading becomes one gold palette color; source PNG bytes are unchanged. The final sample is saved as `Sample 1 GB · Black & Gold` in this PC's library.
+
+Evidence is reproducible through unit tests, golden comparisons, `test:product`, `test:recovery`, `scripts/test-editor-latency.ts`, `scripts/test-canvas-preview.ts`, and the Gold import scripts. Reports and screenshots are under `output/core-perf/`, `output/editor-latency/`, `output/canvas-preview/`, `output/product-smoke/`, and `output/gb-import/`. Performance reports distinguish draw CPU cost from a pointer-event-to-frame proxy; initial loading and exact pixel settlement remain separate costs.

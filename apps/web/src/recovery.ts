@@ -1,0 +1,7 @@
+import type {DesignRecord,EditorAction} from '../../../packages/app-model/src/index';
+export interface Recovery {document:DesignRecord;pending:EditorAction[];savedAt:number}
+let connection:Promise<IDBDatabase>|undefined;
+function database(){return connection??=new Promise<IDBDatabase>((resolve,reject)=>{const request=indexedDB.open('jdm-draft-recovery',1);request.onupgradeneeded=()=>request.result.createObjectStore('drafts');request.onsuccess=()=>resolve(request.result);request.onerror=()=>{connection=undefined;reject(request.error);};});}
+export async function readRecovery(id:string):Promise<Recovery|undefined>{const db=await database();return new Promise((resolve,reject)=>{const r=db.transaction('drafts').objectStore('drafts').get(id);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
+export async function writeRecovery(id:string,value:Recovery):Promise<void>{const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction('drafts','readwrite');tx.objectStore('drafts').put(value,id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error??new Error('Recovery transaction was aborted'));});}
+export async function clearRecovery(id:string):Promise<void>{const db=await database();return new Promise((resolve,reject)=>{const tx=db.transaction('drafts','readwrite');tx.objectStore('drafts').delete(id);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error??new Error('Recovery clear was aborted'));});}

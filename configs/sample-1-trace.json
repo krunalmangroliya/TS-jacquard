@@ -1,0 +1,9 @@
+{
+  "source": "sample-input/sample-1.png",
+  "threshold": 157,
+  "gapClosePx": 0,
+  "repeat": "none",
+  "widthsPx": [300, 1200, 2400],
+  "reason": "Otsu154 drops faint gray ink at source(1542,2789), opening the prominent leaf above-left of the center flower. Threshold157 preserves this boundary. Open decorative hatching is kept separate. This is a sample-specific reviewed configuration, not a global default.",
+  "command": "pnpm sample --sizes-px 300,1200,2400 --gap-close 0 --repeat none --threshold 157"
+}

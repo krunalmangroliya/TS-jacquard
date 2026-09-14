@@ -1,0 +1,1 @@
+{"name":"@jdm/web","version":"0.2.0","private":true,"type":"module","scripts":{"dev":"vite --host 127.0.0.1","build":"vite build"}}

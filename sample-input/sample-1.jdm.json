@@ -1,0 +1,7 @@
+{
+  "threshold": 157,
+  "gapClosePx": 0,
+  "repeat": "none",
+  "widthsPx": [300,1200,2400],
+  "note": "Reviewed for this source: faint leaf boundary closes at157; open hatching is preserved without automatic joins. Panel borders do not match as a seamless repeat. CLI flags explicitly override these settings."
+}
