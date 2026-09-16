@@ -3,6 +3,10 @@ import CanvasEditor, { type CompareMode, type EditorTool } from './CanvasEditor'
 import AiReview, { type AiView } from './AiReview';
 import { analyzeWithAi } from './ai-client';
 import type { AiResult } from './ai-types';
+import RegionReview from './RegionReview';
+import { analyzeRegions } from './region-client';
+import { applyTextureRegions } from './region-proposals';
+import type { RegionScanResult, RegionView } from './region-types';
 import { replaceColor } from './editor';
 import { downloadBlob, encodeBmp, hexRgb, readImageFile, rgbHex, savePng } from './io';
 import { processImage } from './processor';
@@ -79,6 +83,13 @@ export default function App() {
   const [aiBaseline, setAiBaseline] = useState<IndexedImage | null>(null);
   const [aiView, setAiView] = useState<AiView>('proposal');
   const [aiError, setAiError] = useState('');
+  const [regionProgress, setRegionProgress] = useState<Progress | null>(null);
+  const [regions, setRegions] = useState<RegionScanResult | null>(null);
+  const [regionBaseline, setRegionBaseline] = useState<IndexedImage | null>(null);
+  const [selectedRegions, setSelectedRegions] = useState<number[]>([]);
+  const [regionView, setRegionView] = useState<RegionView>('proposal');
+  const [regionError, setRegionError] = useState('');
+  const [focusRegion, setFocusRegion] = useState<{ x: number; y: number; width: number; height: number; token: number }>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [mode, setMode] = useState<CompareMode>('cleaned');
@@ -97,11 +108,16 @@ export default function App() {
   const job = useRef<{ cancel: () => void } | null>(null);
   const aiJob = useRef<{ cancel: () => void } | null>(null);
   const aiTaskId = useRef(0);
+  const regionJob = useRef<{ cancel: () => void } | null>(null);
+  const regionTaskId = useRef(0);
+  const focusToken = useRef(0);
   const taskId = useRef(0);
   const dragDepth = useRef(0);
   const processingBusy = loading || progress !== null || confirmation !== null;
   const aiReviewActive = aiProgress !== null || aiPreview !== null;
-  const busy = processingBusy || aiReviewActive;
+  const regionReviewActive = regionProgress !== null || regions !== null;
+  const reviewActive = aiReviewActive || regionReviewActive;
+  const busy = processingBusy || reviewActive;
   const askConfirmation = useCallback((title: string, description: string): Promise<boolean> => new Promise(resolve => {
     if (confirmResolve.current) { resolve(false); return; }
     confirmResolve.current = resolve;
@@ -137,13 +153,15 @@ export default function App() {
   const options: CleanupOptions = { width, height, read, pick, strength, flattenTexture, outlineColor, protectedColors, repeatX, repeatY };
   const edited = history.images[history.index] || null;
   const orientedSource = useMemo(() => source ? rotateSource(source, sourceOrientation) : null, [source, sourceOrientation]);
-  const displayedImage = aiPreview ? aiView === 'before' ? aiBaseline : aiPreview.image : edited || orientedSource;
+  const regionalImage = useMemo(() => regionBaseline && regions ? applyTextureRegions(regionBaseline, regions.proposals.filter(p => selectedRegions.includes(p.id))) : null, [regionBaseline, regions, selectedRegions]);
+  const regionHighlights = useMemo(() => regions?.proposals.map(p => ({ id: p.id, ...p.bounds, selected: selectedRegions.includes(p.id) })), [regions, selectedRegions]);
+  const displayedImage = regions ? regionView === 'before' ? regionBaseline : regionalImage : aiPreview ? aiView === 'before' ? aiBaseline : aiPreview.image : edited || orientedSource;
   const dirtySettings = !!resultOptions && (!optionsEqual(options, resultOptions) || resultOrientation !== sourceOrientation);
   const baseName = source?.name.replace(/\.[^.]+$/, '') || 'design';
   const outputName = `${baseName}-clean-r${resultOptions?.read || read}p${resultOptions?.pick || pick}`;
   const baseline = useMemo(() => result ? { ...result.image, pixels: result.baseline } : undefined, [result]);
   const aiChangeKinds = useMemo(() => aiPreview?.changes.map(kind => kind === 2 ? 3 : kind), [aiPreview]);
-  const canvasMode: CompareMode = aiPreview ? aiView === 'changes' ? 'changes' : 'cleaned' : result ? mode : 'cleaned';
+  const canvasMode: CompareMode = regions ? regionView === 'changes' ? 'changes' : 'cleaned' : aiPreview ? aiView === 'changes' ? 'changes' : 'cleaned' : result ? mode : 'cleaned';
   const commit = useCallback((next: IndexedImage) => {
     setHistory(current => {
       if (current.images[current.index] === next) return current;
@@ -170,10 +188,12 @@ export default function App() {
     const prevent = (event: BeforeUnloadEvent) => { if (result) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', prevent); return () => window.removeEventListener('beforeunload', prevent);
   }, [result]);
-  useEffect(() => () => { job.current?.cancel(); taskId.current++; aiJob.current?.cancel(); aiTaskId.current++; confirmResolve.current?.(false); confirmResolve.current = null; }, []);
+  useEffect(() => () => { job.current?.cancel(); taskId.current++; aiJob.current?.cancel(); aiTaskId.current++; regionJob.current?.cancel(); regionTaskId.current++; confirmResolve.current?.(false); confirmResolve.current = null; }, []);
   const clearOutput = () => {
     aiTaskId.current++; aiJob.current?.cancel(); aiJob.current = null;
     setAiProgress(null); setAiPreview(null); setAiBaseline(null); setAiError('');
+    regionTaskId.current++; regionJob.current?.cancel(); regionJob.current = null;
+    setRegionProgress(null); setRegions(null); setRegionBaseline(null); setSelectedRegions([]); setRegionError(''); setFocusRegion(undefined);
     setResult(null); setResultOptions(null); setResultOrientation(null); setHistory({ images: [], index: -1 }); setMode('cleaned'); setTool('pan'); setNotice(''); setPhysicalPreview(false);
   };
   const importFile = async (file: File, allowReset = false, preset?: SamplePreset) => {
@@ -280,6 +300,42 @@ export default function App() {
     setAiPreview(null); setAiBaseline(null); setAiError(''); setMode('cleaned');
     setNotice('AI changes applied. Undo restores the canvas from before this trial.');
   };
+  const runRegions = async () => {
+    if (!edited || !resultOptions || busy || exporting || dirtySettings) return;
+    const input = edited, id = ++regionTaskId.current;
+    setRegionBaseline(input); setRegionError(''); setNotice(''); setTool('pan'); setMode('cleaned');
+    setRegionProgress({ stage: 'Preparing full-canvas region analysis', percent: 0 });
+    try {
+      const processing = analyzeRegions(input, { ...resultOptions, protectedColors: [...resultOptions.protectedColors], flattenTexture: true }, next => { if (regionTaskId.current === id) setRegionProgress(next); });
+      regionJob.current = processing;
+      const next = await processing.promise;
+      if (regionTaskId.current !== id) return;
+      // Validate proposals against the frozen canvas before exposing a selectable preview.
+      applyTextureRegions(input, next.proposals);
+      setRegions(next); setSelectedRegions(next.proposals.map(p => p.id)); setRegionView('proposal');
+      if (next.proposals[0]) setFocusRegion({ ...next.proposals[0].bounds, token: ++focusToken.current });
+    } catch (reason) { if (regionTaskId.current === id) { setRegionError(message(reason)); setRegionBaseline(null); } }
+    finally { if (regionTaskId.current === id) { setRegionProgress(null); regionJob.current = null; } }
+  };
+  const cancelRegions = () => {
+    regionTaskId.current++; regionJob.current?.cancel(); regionJob.current = null;
+    setRegionProgress(null); setRegions(null); setRegionBaseline(null); setSelectedRegions([]); setRegionError(''); setFocusRegion(undefined);
+    setNotice('Region analysis cancelled. Your canvas is unchanged.');
+  };
+  const discardRegions = () => {
+    setRegions(null); setRegionBaseline(null); setSelectedRegions([]); setRegionError(''); setFocusRegion(undefined); setMode('cleaned');
+    setNotice('Region preview closed. Your canvas is unchanged.');
+  };
+  const applyRegions = () => {
+    if (!regionalImage || !regionBaseline || edited !== regionBaseline || regionProgress || !selectedRegions.length) return;
+    commit(regionalImage);
+    setRegions(null); setRegionBaseline(null); setSelectedRegions([]); setRegionError(''); setFocusRegion(undefined); setMode('cleaned');
+    setNotice('Selected regions cleaned. Undo restores the whole previous canvas. You can now finish their colors.');
+  };
+  const inspectRegion = (id: number) => {
+    const proposal = regions?.proposals.find(p => p.id === id);
+    if (proposal) setFocusRegion({ ...proposal.bounds, token: ++focusToken.current });
+  };
   const exportFile = async (format: 'bmp' | 'png') => {
     if (!edited || !resultOptions || busy || exporting) return;
     setExporting(true); setError('');
@@ -352,16 +408,16 @@ export default function App() {
         {error && <div className="message-banner error-banner" role="alert"><span>{error}{pendingFile && ' Open Import color options to choose a palette reduction and retry if needed.'}</span><button aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
         {notice && <div className="message-banner notice-banner" role="status"><Icon name="check" size={16} /><span>{notice}</span><button aria-label="Dismiss notice" onClick={() => setNotice('')}><Icon name="close" size={16} /></button></div>}
         <div className="canvas-toolbar"><div className="view-tabs" aria-label="Comparison mode">{(['original', 'cleaned', 'changes'] as const).map((view, index) => <button key={view} disabled={!result || busy} className={(result ? mode === view : view === 'original') ? 'active' : ''} onClick={() => setMode(view)} title={`${view === 'original' ? 'Original resized to the output grid' : view === 'changes' ? 'All changed pixels, including your edits' : 'Cleaned output with your edits'} (${index + 1})`}>{view === 'original' ? 'Sized original' : view === 'cleaned' ? 'Cleaned' : 'Changes'}{view === 'changes' && <i />}</button>)}</div><div className="toolbar-tools"><button disabled={history.index <= 0 || busy} onClick={undo} title="Undo (Ctrl Z)" aria-label="Undo"><Icon name="undo" /></button><button disabled={history.index >= history.images.length - 1 || busy} onClick={redo} title="Redo (Ctrl Shift Z)" aria-label="Redo"><Icon name="redo" /></button><span className="tool-divider" /><label className="physical-toggle"><input type="checkbox" checked={physicalPreview} disabled={!displayedImage || busy} onChange={event => setPhysicalPreview(event.target.checked)} />Cloth proportions</label></div></div>
-        <div className={`canvas-body ${aiReviewActive ? "ai-preview-active" : ""}`}>
-          {aiReviewActive && <div className="ai-canvas-label">{aiProgress ? "AI TRIAL RUNNING · CANVAS UNCHANGED" : aiView === "before" ? "BEFORE AI" : aiView === "changes" ? "AI CHANGES ONLY · NOT APPLIED" : "AI PROPOSAL · NOT APPLIED"}</div>}
-          {displayedImage ? <><div className="floating-tools" role="toolbar" aria-label="Canvas tools">{([{ id: 'pan', label: 'Pan', shortcut: 'H' }, { id: 'fill', label: 'Fill connected region', shortcut: 'F' }, { id: 'pencil', label: 'One-pixel pencil', shortcut: 'B' }, { id: 'pick', label: 'Eyedropper', shortcut: 'I' }] as const).map(item => <button className={tool === item.id ? 'active' : ''} disabled={(busy && !(aiReviewActive && item.id === 'pan')) || (!edited || mode !== 'cleaned') && (item.id === 'fill' || item.id === 'pencil')} onClick={() => setTool(item.id)} title={`${item.label} (${item.shortcut})`} aria-label={item.label} aria-pressed={tool === item.id} key={item.id}><Icon name={item.id} /></button>)}</div><CanvasEditor image={displayedImage} baseline={aiPreview ? aiBaseline || undefined : baseline} automaticImage={aiPreview?.image || result?.image} changeKinds={aiPreview ? aiChangeKinds : result?.changes} mode={canvasMode} tool={tool} selectedColor={safeSelectedColor} editable={!!edited && !busy} physical={physicalPreview} read={resultOptions?.read || orientedSource?.dpiX || 1} pick={resultOptions?.pick || orientedSource?.dpiY || 1} onChange={commit} onPick={setSelectedColor} /></> : <div className="empty-canvas"><div className="empty-motif"><span /><span /><span /><span /><div><Icon name="sparkle" size={28} /></div></div><span className="eyebrow">FROM ARTWORK TO WEAVE-READY PIXELS</span><h3>Start with your artwork.</h3><p>Set the weave dimensions. Refine the pixels.<br />Make the final color decisions yours.</p><button className="empty-upload" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="upload" size={17} /> Choose PNG or BMP <Icon name="arrow" size={17} /></button><div className="sample-divider"><span />or explore a real design<span /></div><button className="sample-card" disabled={busy} onClick={() => void loadSample()}><img src="/samples/pallu-source.png" alt="Floral pallu sample with dancer motifs" /><div><strong>Try the pallu sample</strong><span>7 colors · R96 / P52 · 8 × 19 in</span></div><Icon name="arrow" size={18} /></button><div className="privacy-note"><Icon name="shield" size={14} /> Your artwork stays on this device. No cloud uploads.</div></div>}
+        <div className={`canvas-body ${reviewActive ? "ai-preview-active" : ""}`}>
+          {reviewActive && <div className="ai-canvas-label">{regionReviewActive ? regionProgress ? "FINDING NOISY REGIONS · CANVAS UNCHANGED" : regionView === "before" ? "BEFORE REGION CLEANUP" : regionView === "changes" ? "REGION CHANGES · NOT APPLIED" : "REGION PROPOSALS · NOT APPLIED" : aiProgress ? "AI TRIAL RUNNING · CANVAS UNCHANGED" : aiView === "before" ? "BEFORE AI" : aiView === "changes" ? "AI CHANGES ONLY · NOT APPLIED" : "AI PROPOSAL · NOT APPLIED"}</div>}
+          {displayedImage ? <><div className="floating-tools" role="toolbar" aria-label="Canvas tools">{([{ id: 'pan', label: 'Pan', shortcut: 'H' }, { id: 'fill', label: 'Fill connected region', shortcut: 'F' }, { id: 'pencil', label: 'One-pixel pencil', shortcut: 'B' }, { id: 'pick', label: 'Eyedropper', shortcut: 'I' }] as const).map(item => <button className={tool === item.id ? 'active' : ''} disabled={(busy && !(reviewActive && item.id === 'pan')) || (!edited || mode !== 'cleaned') && (item.id === 'fill' || item.id === 'pencil')} onClick={() => setTool(item.id)} title={`${item.label} (${item.shortcut})`} aria-label={item.label} aria-pressed={tool === item.id} key={item.id}><Icon name={item.id} /></button>)}</div><CanvasEditor image={displayedImage} baseline={regions ? regionBaseline || undefined : aiPreview ? aiBaseline || undefined : baseline} automaticImage={regions ? regionalImage || undefined : aiPreview?.image || result?.image} changeKinds={regions ? undefined : aiPreview ? aiChangeKinds : result?.changes} focusRegion={regions ? focusRegion : undefined} highlightRegions={regionHighlights} mode={canvasMode} tool={tool} selectedColor={safeSelectedColor} editable={!!edited && !busy} physical={physicalPreview} read={resultOptions?.read || orientedSource?.dpiX || 1} pick={resultOptions?.pick || orientedSource?.dpiY || 1} onChange={commit} onPick={setSelectedColor} /></> : <div className="empty-canvas"><div className="empty-motif"><span /><span /><span /><span /><div><Icon name="sparkle" size={28} /></div></div><span className="eyebrow">FROM ARTWORK TO WEAVE-READY PIXELS</span><h3>Start with your artwork.</h3><p>Set the weave dimensions. Refine the pixels.<br />Make the final color decisions yours.</p><button className="empty-upload" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="upload" size={17} /> Choose PNG or BMP <Icon name="arrow" size={17} /></button><div className="sample-divider"><span />or explore a real design<span /></div><button className="sample-card" disabled={busy} onClick={() => void loadSample()}><img src="/samples/pallu-source.png" alt="Floral pallu sample with dancer motifs" /><div><strong>Try the pallu sample</strong><span>7 colors · R96 / P52 · 8 × 19 in</span></div><Icon name="arrow" size={18} /></button><div className="privacy-note"><Icon name="shield" size={14} /> Your artwork stays on this device. No cloud uploads.</div></div>}
           {(progress || loading) && <div className="processing-overlay"><div className="processing-card"><div className="processing-symbol"><Icon name="sparkle" size={30} /></div><span className="eyebrow">{loading ? 'READING ARTWORK' : 'REFINING YOUR DESIGN'}</span><h3>{loading ? 'Building your palette…' : progress!.stage}</h3><div className="progress-track"><i style={{ width: `${loading ? 30 : Math.max(0, Math.min(100, progress!.percent))}%` }} /></div><p>{loading ? 'Reading pixels locally in your browser' : `${Math.round(progress!.percent)}% · processing the original source`}</p>{progress && <button className="small-button" onClick={cancel}>Cancel processing</button>}</div></div>}
         </div>
-        <div className="canvas-bottom"><span className="canvas-instruction">{aiReviewActive ? 'AI trial · pan and zoom to review · apply or discard the proposal to continue editing' : !source ? 'A considered finish, down to the last pixel.' : mode !== 'cleaned' && result ? 'Inspect this view · switch to Cleaned to edit' : tool === 'fill' ? 'Choose a color, then click a connected region to fill' : tool === 'pencil' ? 'Drag to draw a continuous one-pixel stroke' : tool === 'pick' ? 'Click any pixel to pick its palette color' : 'Scroll to zoom · drag to pan · hold Space with any tool'}</span>{source && <span className="pixel-badge"><i /> ZOOM FOR PIXEL INSPECTION</span>}</div>
-        <div className="output-bar"><div className="output-status"><span className={`status-dot ${result ? 'ready' : ''}`} /><div><strong>{aiPreview ? 'Review the AI proposal' : aiProgress ? 'AI trial running' : result ? dirtySettings ? 'Settings changed' : 'Ready for your finishing touch' : 'Your next weave starts here'}</strong><span>{aiReviewActive ? 'Your committed canvas is unchanged. Downloads resume after this review.' : result ? dirtySettings ? 'Reprocess to apply the new recipe. Downloads use the current canvas.' : `${result.stats.changedPixels.toLocaleString()} pixels changed · ${(result.stats.elapsedMs / 1000).toFixed(1)}s · review fine details before use` : 'Cleaned, indexed BMP output for NedGraphics'}</span></div></div><div className="output-actions">{result && <button className="new-output-button" disabled={busy} onClick={async () => { if (await askConfirmation('Start a new output?', 'Start again from the original source with a fresh canvas. Download the current result first to keep it.')) clearOutput(); }}><Icon name="reset" size={15} /> New output</button>}<button className="png-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('png')}>PNG</button><button className="export-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('bmp')}><Icon name="download" size={17} />{exporting ? 'Preparing…' : 'Export BMP'}</button></div></div>
+        <div className="canvas-bottom"><span className="canvas-instruction">{reviewActive ? 'Review the proposed areas · pan and zoom · apply selected changes or discard to continue editing' : !source ? 'A considered finish, down to the last pixel.' : mode !== 'cleaned' && result ? 'Inspect this view · switch to Cleaned to edit' : tool === 'fill' ? 'Choose a color, then click a connected region to fill' : tool === 'pencil' ? 'Drag to draw a continuous one-pixel stroke' : tool === 'pick' ? 'Click any pixel to pick its palette color' : 'Scroll to zoom · drag to pan · hold Space with any tool'}</span>{source && <span className="pixel-badge"><i /> ZOOM FOR PIXEL INSPECTION</span>}</div>
+        <div className="output-bar"><div className="output-status"><span className={`status-dot ${result ? 'ready' : ''}`} /><div><strong>{regions ? 'Review the noisy regions' : regionProgress ? 'Finding noisy regions' : aiPreview ? 'Review the AI proposal' : aiProgress ? 'AI trial running' : result ? dirtySettings ? 'Settings changed' : 'Ready for your finishing touch' : 'Your next weave starts here'}</strong><span>{reviewActive ? 'Your committed canvas is unchanged. Downloads resume after this review.' : result ? dirtySettings ? 'Reprocess to apply the new recipe. Downloads use the current canvas.' : `${result.stats.changedPixels.toLocaleString()} pixels changed · ${(result.stats.elapsedMs / 1000).toFixed(1)}s · review fine details before use` : 'Cleaned, indexed BMP output for NedGraphics'}</span></div></div><div className="output-actions">{result && <button className="new-output-button" disabled={busy} onClick={async () => { if (await askConfirmation('Start a new output?', 'Start again from the original source with a fresh canvas. Download the current result first to keep it.')) clearOutput(); }}><Icon name="reset" size={15} /> New output</button>}<button className="png-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('png')}>PNG</button><button className="export-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('bmp')}><Icon name="download" size={17} />{exporting ? 'Preparing…' : 'Export BMP'}</button></div></div>
       </main>
       {displayedImage && <aside className="inspector-panel">
-        {result && edited && <AiReview progress={aiProgress} result={aiPreview} view={aiView} error={aiError} disabled={processingBusy || exporting} settingsChanged={dirtySettings} onRun={() => void runAi()} onCancel={cancelAi} onApply={applyAi} onDiscard={discardAi} onView={setAiView} />}<div className="inspector-heading"><span className="eyebrow">FINISHING TOOLS</span><h2>Your color palette<span>{activePalette.length}</span></h2><p>{edited ? 'Select a color, then fill a region or draw.' : 'Source colors. Process the artwork to start editing.'}</p></div><div className="palette-grid">{activePalette.map((color, index) => <button key={index} disabled={busy} className={`palette-swatch ${safeSelectedColor === index ? 'active' : ''}`} onClick={() => setSelectedColor(index)} style={{ '--swatch': rgbHex(color) } as React.CSSProperties} title={`Color ${index + 1}: ${rgbHex(color).toUpperCase()}`} aria-label={`Select color ${index + 1}, ${rgbHex(color)}`} aria-pressed={safeSelectedColor === index}><span>{safeSelectedColor === index && <Icon name="check" size={18} />}</span><small>{String(index + 1).padStart(2, '0')}</small></button>)}</div><div className="selected-color"><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><div><span>SELECTED INK</span><strong>{activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]).toUpperCase() : '—'}</strong></div><small>{safeSelectedColor + 1}</small></div>
+        {result && edited && <><RegionReview progress={regionProgress} result={regions} selectedIds={selectedRegions} view={regionView} error={regionError} disabled={processingBusy || exporting || aiReviewActive} settingsChanged={dirtySettings} onRun={() => void runRegions()} onCancel={cancelRegions} onApply={applyRegions} onDiscard={discardRegions} onView={setRegionView} onToggle={id => setSelectedRegions(ids => ids.includes(id) ? ids.filter(value => value !== id) : [...ids, id])} onFocus={inspectRegion} onSelectAll={() => setSelectedRegions(regions?.proposals.map(p => p.id) || [])} onSelectNone={() => setSelectedRegions([])} /><details className="pixel-trial-options" open={aiReviewActive || undefined}><summary>Small pixel model trial</summary><AiReview progress={aiProgress} result={aiPreview} view={aiView} error={aiError} disabled={processingBusy || exporting || regionReviewActive} settingsChanged={dirtySettings} onRun={() => void runAi()} onCancel={cancelAi} onApply={applyAi} onDiscard={discardAi} onView={setAiView} /></details></>}<div className="inspector-heading"><span className="eyebrow">FINISHING TOOLS</span><h2>Your color palette<span>{activePalette.length}</span></h2><p>{edited ? 'Select a color, then fill a region or draw.' : 'Source colors. Process the artwork to start editing.'}</p></div><div className="palette-grid">{activePalette.map((color, index) => <button key={index} disabled={busy} className={`palette-swatch ${safeSelectedColor === index ? 'active' : ''}`} onClick={() => setSelectedColor(index)} style={{ '--swatch': rgbHex(color) } as React.CSSProperties} title={`Color ${index + 1}: ${rgbHex(color).toUpperCase()}`} aria-label={`Select color ${index + 1}, ${rgbHex(color)}`} aria-pressed={safeSelectedColor === index}><span>{safeSelectedColor === index && <Icon name="check" size={18} />}</span><small>{String(index + 1).padStart(2, '0')}</small></button>)}</div><div className="selected-color"><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><div><span>SELECTED INK</span><strong>{activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]).toUpperCase() : '—'}</strong></div><small>{safeSelectedColor + 1}</small></div>
         <div className="inspector-section"><h3>Add a color</h3><div className="add-color"><input type="color" aria-label="New palette color" value={newColor} disabled={!edited || busy || activePalette.length >= 256} onChange={event => setNewColor(event.target.value)} /><span>{newColor.toUpperCase()}</span><button disabled={!edited || busy || activePalette.length >= 256} onClick={addColor}>Add</button></div>{activePalette.length >= 256 && <p className="field-hint">Palette full: 256 colors.</p>}</div>
         <div className="inspector-section"><h3>Replace across the design</h3><p>Swap every pixel of one color with the selected ink.</p><label>Replace color<select disabled={!edited || busy} value={Math.min(replaceFrom, activePalette.length - 1)} onChange={event => setReplaceFrom(Number(event.target.value))}>{activePalette.map((color, index) => <option key={index} value={index}>Color {index + 1} · {rgbHex(color).toUpperCase()}</option>)}</select></label><div className="replace-preview"><i style={{ background: activePalette[Math.min(replaceFrom, activePalette.length - 1)] ? rgbHex(activePalette[Math.min(replaceFrom, activePalette.length - 1)]) : '#000' }} /><Icon name="arrow" size={16} /><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><span>Color {safeSelectedColor + 1}</span></div><button className="replace-button" disabled={!edited || busy || replaceFrom === safeSelectedColor || mode !== 'cleaned'} onClick={() => edited && commit(replaceColor(edited, replaceFrom, safeSelectedColor))}>Replace all occurrences</button><p className="field-hint">For just one connected area, use the fill tool.</p></div>
         {result && <div className="inspector-section result-details"><h3>Cleanup report</h3><dl><div><dt>Changed pixels</dt><dd>{result.stats.changedPixels.toLocaleString()}</dd></div><div><dt>Speck fragments</dt><dd>{result.stats.specksRemoved.toLocaleString()}</dd></div><div><dt>Line pixels added</dt><dd>{result.stats.gapsRepaired.toLocaleString()}</dd></div><div><dt>Texture pixels cleaned</dt><dd>{result.stats.texturePixels.toLocaleString()}</dd></div>{result.stats.linePaths !== undefined && <div><dt>Traced line paths</dt><dd>{result.stats.linePaths.toLocaleString()}</dd></div>}</dl><p className="field-hint">Rule cleanup only; AI and canvas edits are separate. Counts do not measure design quality.</p>{result.warnings.length > 0 && <div className="review-notes"><strong>Review notes</strong>{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}</div>}

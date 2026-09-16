@@ -5,6 +5,25 @@ import type { IndexedImage } from './types';
 
 export type EditorTool = 'pan' | 'fill' | 'pencil' | 'pick';
 export type CompareMode = 'cleaned' | 'original' | 'changes';
+export interface CanvasRegionBounds { x: number; y: number; width: number; height: number }
+export interface CanvasFocusRegion extends CanvasRegionBounds { token: number }
+export interface CanvasHighlightRegion extends CanvasRegionBounds { id: number; selected: boolean }
+
+export function clipCanvasRegion(region: CanvasRegionBounds, image: { width: number; height: number }): CanvasRegionBounds | null {
+  if (![region.x, region.y, region.width, region.height].every(Number.isFinite) || region.width <= 0 || region.height <= 0) return null;
+  const x = Math.max(0, region.x), y = Math.max(0, region.y);
+  const right = Math.min(image.width, region.x + region.width), bottom = Math.min(image.height, region.y + region.height);
+  return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+}
+
+/** Fits the full region with room for controls, retaining exact pixel zoom when it fits. */
+export function regionFocusCamera(region: CanvasRegionBounds, viewport: { width: number; height: number }, image: { width: number; height: number }, yRatio = 1): { x: number; y: number; scale: number } | null {
+  const clipped = clipCanvasRegion(region, image);
+  if (!clipped || viewport.width <= 0 || viewport.height <= 0 || !Number.isFinite(yRatio) || yRatio <= 0) return null;
+  const scale = Math.max(.01, Math.min(16, Math.max(1, viewport.width - 140) / clipped.width, Math.max(1, viewport.height - 120) / (clipped.height * yRatio)));
+  return { x: viewport.width / 2 - (clipped.x + clipped.width / 2) * scale, y: viewport.height / 2 - (clipped.y + clipped.height / 2) * scale * yRatio, scale };
+}
+
 interface Props {
   image: IndexedImage;
   baseline?: IndexedImage;
@@ -17,14 +36,18 @@ interface Props {
   physical: boolean;
   read: number;
   pick: number;
+  focusRegion?: CanvasFocusRegion;
+  highlightRegions?: ReadonlyArray<CanvasHighlightRegion>;
   onChange: (image: IndexedImage) => void;
   onPick: (color: number) => void;
 }
 export default function CanvasEditor(props: Props) {
-  const { image, baseline, automaticImage, changeKinds, mode, tool, selectedColor, editable, physical, read, pick, onChange, onPick } = props;
+  const { image, baseline, automaticImage, changeKinds, mode, tool, selectedColor, editable, physical, read, pick, focusRegion, highlightRegions, onChange, onPick } = props;
   const host = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const tileCanvas = useRef<HTMLCanvasElement | null>(null);
+  const viewportMeasured = useRef(false);
+  const lastFocusToken = useRef<number | undefined>(undefined);
   const [size, setSize] = useState({ width: 800, height: 600 });
   const [camera, setCamera] = useState({ x: 0, y: 0, scale: 1 });
   const [grid, setGrid] = useState(true);
@@ -53,11 +76,19 @@ export default function CanvasEditor(props: Props) {
   useEffect(() => {
     const observer = new ResizeObserver(entries => {
       const rect = entries[0].contentRect;
+      viewportMeasured.current = true;
       setSize({ width: rect.width, height: rect.height });
     });
     if (host.current) observer.observe(host.current);
     return () => observer.disconnect();
   }, []);
+  useEffect(() => {
+    if (!focusRegion || !viewportMeasured.current || !Number.isFinite(focusRegion.token) || lastFocusToken.current === focusRegion.token) return;
+    const next = regionFocusCamera(focusRegion, size, image, yRatio);
+    if (!next) return;
+    lastFocusToken.current = focusRegion.token;
+    setCamera(next);
+  }, [focusRegion, size, image.width, image.height, yRatio]);
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement).closest('input, select, textarea, button')) return;
@@ -125,7 +156,31 @@ export default function CanvasEditor(props: Props) {
       for (let y = y0; y <= y1; y++) { context.moveTo(Math.max(0, camera.x), camera.y + y * camera.scale * yRatio); context.lineTo(Math.min(size.width, camera.x + image.width * camera.scale), camera.y + y * camera.scale * yRatio); }
       context.stroke();
     }
-  }, [overview, shownImage, previewStyle, size, camera, image.width, image.height, yRatio, grid]);
+    if (highlightRegions?.length) {
+      context.save();
+      context.font = '600 11px system-ui, sans-serif'; context.textBaseline = 'middle';
+      // Draw selected regions last so their boundaries stay visible at overlaps.
+      for (const region of [...highlightRegions].sort((a, b) => Number(a.selected) - Number(b.selected))) {
+        const rect = clipCanvasRegion(region, image);
+        if (!rect) continue;
+        const x = camera.x + rect.x * camera.scale, y = camera.y + rect.y * camera.scale * yRatio;
+        const width = rect.width * camera.scale, height = rect.height * camera.scale * yRatio;
+        if (x > size.width || y > size.height || x + width < 0 || y + height < 0) continue;
+        context.setLineDash([]); context.lineWidth = 4; context.strokeStyle = '#172013d9';
+        context.strokeRect(x, y, width, height);
+        context.setLineDash(region.selected ? [] : [5, 4]); context.lineWidth = 2;
+        context.strokeStyle = region.selected ? '#ceeaa3' : '#b1b6a9'; context.strokeRect(x, y, width, height);
+        const label = `Region ${region.id}`, labelWidth = context.measureText(label).width + 14;
+        const labelX = Math.max(6, Math.min(size.width - labelWidth - 6, x + 5));
+        const labelY = Math.max(6, Math.min(size.height - 27, y + 5));
+        context.setLineDash([]); context.fillStyle = region.selected ? '#ceeaa3' : '#343c2e';
+        context.fillRect(labelX, labelY, labelWidth, 21);
+        context.fillStyle = region.selected ? '#2c4220' : '#d1d8c5';
+        context.fillText(label, labelX + 7, labelY + 10.5);
+      }
+      context.restore();
+    }
+  }, [overview, shownImage, previewStyle, size, camera, image.width, image.height, yRatio, grid, highlightRegions]);
   const point = (event: React.PointerEvent) => {
     const bounds = canvas.current!.getBoundingClientRect();
     const sx = event.clientX - bounds.left, sy = event.clientY - bounds.top;
