@@ -1,0 +1,283 @@
+{
+  "id": "loom-tiny-v1",
+  "name": "Loom Tiny v1",
+  "version": 1,
+  "experimental": true,
+  "modelFile": "loom-tiny-v1.onnx",
+  "qualification": "Noise-only review trial; line-add disabled by validation. Synthetic measurements do not establish real-artwork accuracy.",
+  "architecture": "TinyInkNet shared encoder with add/remove logit heads",
+  "parameters": 118002,
+  "bytes": 477714,
+  "sha256": "bbfb717035362989098cf3207fea94a1556ea2accac7237b1d15bf9809d83b2b",
+  "opset": 17,
+  "input": {
+    "name": "ink",
+    "dtype": "float32",
+    "shape": [
+      1,
+      1,
+      64,
+      64
+    ],
+    "values": "0 background, 1 candidate palette ink; no RGB normalization"
+  },
+  "output": {
+    "name": "logits",
+    "dtype": "float32",
+    "shape": [
+      1,
+      2,
+      64,
+      64
+    ],
+    "heads": [
+      "add",
+      "remove"
+    ],
+    "activation": "sigmoid"
+  },
+  "validRegion": {
+    "x": 16,
+    "y": 16,
+    "width": 32,
+    "height": 32
+  },
+  "thresholds": {
+    "add": 1.0,
+    "remove": 0.995
+  },
+  "validationPrecisionTarget": 0.98,
+  "validationPrecisionTargetMet": {
+    "add": false,
+    "remove": true
+  },
+  "seed": 240916,
+  "splits": {
+    "train": [
+      "42482",
+      "42850"
+    ],
+    "validation": [
+      "42973"
+    ],
+    "test": [
+      "45842"
+    ]
+  },
+  "training": {
+    "epochsRequested": 8,
+    "patchesPerEpoch": 8000,
+    "batchSize": 32,
+    "learningRate": 0.001,
+    "positiveLossWeight": 24,
+    "unchangedPatchFraction": 0.3,
+    "syntheticDefects": "1\u20133 pixel gaps and specks on native COMPLETE BMP binary color masks"
+  },
+  "evaluation": {
+    "kind": "synthetic held-out corruptions only",
+    "validationPatches": 2000,
+    "testPatches": 2000,
+    "validation": {
+      "add": {
+        "threshold": 0.988,
+        "truePositive": 40,
+        "falsePositive": 2,
+        "falseNegative": 2755,
+        "positivePixels": 2795,
+        "precision": 0.9523809523809523,
+        "recall": 0.014311270125223614,
+        "unchangedDetailDamagePixels": 0,
+        "unchangedEligiblePixels": 332998,
+        "unchangedDetailDamagePer100k": 0.0
+      },
+      "remove": {
+        "threshold": 0.995,
+        "truePositive": 956,
+        "falsePositive": 18,
+        "falseNegative": 2283,
+        "positivePixels": 3239,
+        "precision": 0.9815195071868583,
+        "recall": 0.295152824945971,
+        "unchangedDetailDamagePixels": 1,
+        "unchangedEligiblePixels": 284474,
+        "unchangedDetailDamagePer100k": 0.35152597425423765
+      }
+    },
+    "test": {
+      "add": {
+        "threshold": 0.988,
+        "truePositive": 42,
+        "falsePositive": 5,
+        "falseNegative": 2639,
+        "positivePixels": 2681,
+        "precision": 0.8936170212765957,
+        "recall": 0.015665796344647518,
+        "unchangedDetailDamagePixels": 0,
+        "unchangedEligiblePixels": 410125,
+        "unchangedDetailDamagePer100k": 0.0
+      },
+      "remove": {
+        "threshold": 0.995,
+        "truePositive": 1036,
+        "falsePositive": 93,
+        "falseNegative": 2140,
+        "positivePixels": 3176,
+        "precision": 0.9176262178919398,
+        "recall": 0.3261964735516373,
+        "unchangedDetailDamagePixels": 21,
+        "unchangedEligiblePixels": 227827,
+        "unchangedDetailDamagePer100k": 9.217520311464401
+      }
+    },
+    "thresholdPolicy": "Metrics retain the validation-selected candidate thresholds, including disabled-head measurements; deployment thresholds and disabledHeads govern application use."
+  },
+  "exportVerification": {
+    "maximumAbsoluteLogitError": 3.337860107421875e-06,
+    "onnxCpuMedianPatchMs": 1.1448999994172482,
+    "threads": 4,
+    "notBrowserTiming": true
+  },
+  "provenance": {
+    "train": [
+      {
+        "shape": [
+          832,
+          724
+        ],
+        "name": "42482 patto copy.bmp(r96p52) COMPLETE  FILE.bmp",
+        "design": "42482",
+        "sha256": "f31fd586d30ba1054fe30d0545cf6d12bb16c30083c1af05c42d217da17239d9",
+        "paletteSize": 7
+      },
+      {
+        "shape": [
+          832,
+          1536
+        ],
+        "name": "42482bodi(r96p52) COMPLETE   FILE.bmp",
+        "design": "42482",
+        "sha256": "802fd78218465c6bbf696b3efd0f8d7b2a3e25def59a5987754594ea97ead08e",
+        "paletteSize": 7
+      },
+      {
+        "shape": [
+          992,
+          768
+        ],
+        "name": "42482pallu (r96p52)COMPLETE FILE.bmp",
+        "design": "42482",
+        "sha256": "79eb4c56f6222432e1b91dd8a7f11a30003522c754035657377108836400d39e",
+        "paletteSize": 7
+      },
+      {
+        "shape": [
+          1824,
+          3040
+        ],
+        "name": "42850 pallu [r 200 p 76] COMPLETE  FILE.bmp",
+        "design": "42850",
+        "sha256": "814577d7fa7b04bdde999d9045027d07e24c1e6ae93e0a10352aeae875ac143d",
+        "paletteSize": 18
+      },
+      {
+        "shape": [
+          1478,
+          384
+        ],
+        "name": "42850 patto (r200p76) COMPLETE.bmp",
+        "design": "42850",
+        "sha256": "ed2eb96bb3f59ce4ab9e4ca50c01c5988c8492eb336fb01df8c626d29a959894",
+        "paletteSize": 13
+      }
+    ],
+    "validation": [
+      {
+        "shape": [
+          686,
+          1560
+        ],
+        "name": "42973 bodi(R200 p66) COMPLETE.bmp",
+        "design": "42973",
+        "sha256": "c7c08a6fb878705dc01cc4062cb9493e66ec8aefbcaf1a48886773e3c808188e",
+        "paletteSize": 7
+      },
+      {
+        "shape": [
+          1374,
+          3120
+        ],
+        "name": "42973pallu (R200 p66) COMPLETE.bmp",
+        "design": "42973",
+        "sha256": "8da81429d2f01981775f16240c989c91acf56c002f5ea3d5b17cd37c3b183d8e",
+        "paletteSize": 9
+      },
+      {
+        "shape": [
+          686,
+          1500
+        ],
+        "name": "42973patta (R200 p66)...COMPLETE.bmp",
+        "design": "42973",
+        "sha256": "24402c73ec277d39c126fed7a484458b1c233af586e51206ebaeae09425fef6b",
+        "paletteSize": 9
+      }
+    ],
+    "test": [
+      {
+        "shape": [
+          416,
+          914
+        ],
+        "name": "45842 daman (R96P52 COMPLETE.bmp",
+        "design": "45842",
+        "sha256": "19b17c63765b7f64dc7a102a98d8cfc403c23261602d0bcf146a25788f2bad58",
+        "paletteSize": 7
+      },
+      {
+        "shape": [
+          966,
+          768
+        ],
+        "name": "45842 pallu copy.bmp (R96P52).COMPLETE.bmp",
+        "design": "45842",
+        "sha256": "480d8ecc0a610a6b34f4f8f55a3de03ab9c2d583fca68e75761eb89bb9fce3a5",
+        "paletteSize": 10
+      }
+    ]
+  },
+  "limitations": [
+    "No real defect accuracy has been measured.",
+    "Synthetic known edits are labels; source/final file differences are not labels.",
+    "Ten artwork files represent only four design IDs.",
+    "A one-channel mask cannot establish human intent for every dot, hole or crossing.",
+    "Use only as an opt-in candidate reviewer alongside palette/source/topology constraints.",
+    "Thresholds were selected on design 42973; design 45842 was evaluated only after selection."
+  ],
+  "runtime": {
+    "python": "3.12.14",
+    "torch": "2.14.0+cpu",
+    "numpy": "2.3.5",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.30.0"
+  },
+  "calibratedThresholds": {
+    "add": 0.988,
+    "remove": 0.995
+  },
+  "disabledHeads": [
+    "add"
+  ],
+  "disabledHeadReasons": {
+    "add": "Validation precision target 98.00% was not met; best measurable candidate precision=0.9523809523809523, recall=0.014311270125223614. Head disabled before deployment."
+  },
+  "headEnablementPolicy": "Validation precision >= target and at least 20 true positives; test scores do not change enabled heads or thresholds.",
+  "negativePatchAudit": {
+    "sampledEpoch": 0,
+    "sampledPatches": 2000,
+    "unchangedPatches": 592,
+    "unchangedPatchesWithSmallInkComponents": 6,
+    "unchangedPatchesWithEnclosedHoles": 48,
+    "unchangedPatchesWithThinStrokePixels": 490,
+    "method": "Geometry audit of unchanged COMPLETE-mask patches; small four-connected ink components <=4 pixels excluding core-edge components, enclosed background components <=16 pixels, thin pixels with 2-3 ink neighbors. Features can overlap; no semantic annotation is claimed."
+  }
+}

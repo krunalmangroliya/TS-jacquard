@@ -6,7 +6,7 @@ A separate local web application for preparing Jacquard artwork: **PNG → outpu
 
 On this PC double-click **Start-Loom-Clean.cmd**. The app opens at **http://127.0.0.1:4328**. The launcher builds and serves the production app with its local cleanup service. It reopens an existing Loom Clean server when available; otherwise keep its terminal open while working. Closing that terminal stops a server started by the launcher.
 
-This checkout uses the existing parent `node_modules`, and the launcher also finds the Codex-bundled Node runtime when Node is not on the normal Windows PATH. For a standalone copy, install Node.js 22.12+ and run `npm install` inside this folder first.
+This checkout has its own dependencies and `pnpm-lock.yaml`. The launcher also finds the Codex-bundled Node runtime when Node is not on the normal Windows PATH. For a standalone copy, install Node.js 22.12+ and run `pnpm install --ignore-workspace --frozen-lockfile` inside this folder first. `npm install` is also possible, but does not use the pinned pnpm lockfile.
 
 ```sh
 npm start
@@ -14,7 +14,7 @@ npm run test
 npm run build
 ```
 
-Inside this existing workspace, the equivalent checks without npm are `node ../node_modules/typescript/bin/tsc --noEmit`, `node ../node_modules/vitest/vitest.mjs run --config vitest.config.ts --configLoader runner`, and `node ../node_modules/vite/bin/vite.js build --configLoader runner`.
+Inside this existing workspace, the equivalent checks without npm are `node node_modules/typescript/bin/tsc --noEmit`, `node node_modules/vitest/vitest.mjs run --config vitest.config.ts --configLoader runner`, and `node node_modules/vite/bin/vite.js build --configLoader runner`.
 
 The four native-service integration tests are opt-in: start the production studio with no cleanup running, set `LOOM_NATIVE_SMOKE=1` in the test process environment, and run the test command. Default unit tests do not need a running server.
 
@@ -39,7 +39,25 @@ The engine is implemented in this project and does not import the existing JDM c
 
 Line repair now considers every ink, with the selected primary outline given priority. Facing endpoints nominate short connections; an exact path is traced through the original PNG and its actual course is projected onto the output grid. Source gradient coherence rejects isotropic grain connections. Protected colors, small holes and competing strokes veto repairs. Balanced mode allows up to three added cells per path; strong allows four. Each stage reads a frozen input, and repairs cannot seed further repairs in that stage. Original source gaps without a supporting path remain unchanged. Enlarging either axis disables line reconstruction.
 
-No pretrained or trained neural network runs in this version. This is image processing, not a generative redraw. MobileSAM, SAM 2.1 Tiny and Florence-2 were researched, not executed; their region masks do not establish correct one-pixel repairs. The local research note is in `output/model-research.md`. Repeated-edge connectivity is supported; automatic discovery/copying of repeated interior motifs is not implemented. A future learned candidate classifier needs reviewed aligned labels, validation with entire design IDs held out, and evidence that it improves corrections over this baseline.
+The original cleanup engine stays available unchanged. An optional trained neural model runs only when **Run AI trial** is selected after cleanup. Repeated-edge connectivity is supported; automatic discovery/copying of repeated interior motifs is not implemented.
+
+## Small AI trial
+
+The rule-based checkpoint is commit **0842267**. The experiment lives on branch **codex/loom-clean-tiny-ai**.
+
+The shipped model is a **noise-removal review trial**. Its line-add head is disabled because it failed the validation precision target. Existing source-supported line repair still runs in the original cleanup. At its selected threshold, the noise head measured 91.76% precision and 32.62% recall on held-out **synthetic** defects; this is not real-artwork accuracy. On the ten actual V2 sample outputs the bounded trial proposed 158 additional pixel removals. Most visible residual grain remains, so this model is not yet a substantial cleanup-quality improvement.
+
+**Run AI trial** starts from the current edited canvas. A custom 118,002-parameter model evaluates binary masks of existing palette inks in 64×64 patches. It proposes adding ink across short gaps and removing small unwanted components. Geometry checks preserve protected colors and reject ambiguous rings, connected strokes and competing inks. No new RGB colors or output dimensions are generated.
+
+The trial uses ONNX Runtime Web 1.30.0 in a separate browser worker, with the WASM CPU provider and one thread. Model weights are approximately 0.48 MB. The separate WASM runtime asset is approximately 14.24 MB before transfer compression; those bytes are not included in the weight size. Assets are served locally, checked against the model SHA-256, and loaded only when the trial starts. No remote model service, WebGPU or login is required.
+
+Review **Before AI**, **Proposed**, and **AI changes** at pixel zoom. Magenta marks removals; green marks additions. **Apply AI changes** commits one undoable edit. **Discard preview** and **Cancel AI trial** leave the committed canvas intact. Editing, recipe changes and export pause during the trial/review; pan and zoom remain available. A trial with no accepted edits leaves Apply disabled.
+
+This first experiment selects at most 32 candidate patches and samples at most one million positions. Only each patch's central 32×32 core may change; surrounding pixels supply context. The UI reports limited coverage. Running it is not a claim that the entire image has been checked.
+
+Training uses known artificial gaps and specks in the supplied completed designs, with unchanged negative examples. Entire design IDs are separated: 42482 and 42850 for training, 42973 for validation, and 45842 for held-out testing. Source/final differences are not treated as labels because they include recoloring and layout changes. Synthetic precision/recall does not establish accuracy on real defects or time saved in NedGraphics. Sigmoid scores are model scores, not probabilities that an edit is correct. The model card in `public/models/loom-tiny-v1.json` records the training split, thresholds, measurements and limits. See `ai/README.md` for reproduction.
+
+Run `node node_modules/tsx/dist/cli.mjs scripts/evaluate-ai.ts` after the V2 evaluation to produce local BMP proposals, structural checks, timings and before/after crops under `output/ai-experiment/`. It uses the frozen V2 BMPs as inputs and the same inference and proposal guards as the browser. These comparisons measure proposed edits, not real-artwork accuracy.
 
 The engine does not assign weaves, check floats or produce machine files. Those steps remain in NedGraphics. Successful BMP parsing here does not substitute for a real NedGraphics import check.
 
@@ -49,7 +67,7 @@ The engine does not assign weaves, check floats or produce machine files. Those 
 - Output: up to 8192 pixels per side and 8 million pixels total. These limits include the supplied 32.8-megapixel source and 5.5-megapixel target. Detail smaller than the output grid cannot always be retained. Strong cleanup needs closer inspection.
 - Run `npm run evaluate` for this PC's supplied sample paths, or pass `--source`, `--sized`, and `--reference` paths. Reports and visual comparisons are written under `output/evaluation/`.
 - `scripts/analyze-samples.ts` inventories all local triples and records orientation, palette and alignment issues under `output/sample-analysis/`. `scripts/engine-v1.ts` is the frozen first-version benchmark, never imported by the web app. V2 comparison artifacts are separate so the old result can be inspected honestly.
-- Run `node ../node_modules/tsx/dist/cli.mjs scripts/evaluate-v2.ts --full` after the inventory to compare the ten PNG inputs and ten sized inputs against the frozen first version. The report checks dimensions, palette preservation, unchanged inputs and BMP round trips. `output/sample-analysis/v2-full-review.html` shows source-sized input, V1, V2 and the contextual completed reference side by side.
+- Run `node node_modules/tsx/dist/cli.mjs scripts/evaluate-v2.ts --full` after the inventory to compare the ten PNG inputs and ten sized inputs against the frozen first version. The report checks dimensions, palette preservation, unchanged inputs and BMP round trips. `output/sample-analysis/v2-full-review.html` shows source-sized input, V1, V2 and the contextual completed reference side by side.
 - The supplied completed sample is 768 × 992 and contains intentional recoloring and structural edits. It is contextual reference, not an aligned pixel-perfect label for the 768 × 988 sized image. Reports do not call singleton reduction accuracy or claim measured labor savings.
 - Unit checks cover source-supported repairs, real gaps, protected colors, dot/hole preservation, edge connectivity, image import/export, deterministic processing and local/global editor operations. Real designer review and timed NedGraphics corrections on additional designs remain necessary to measure production quality.
 

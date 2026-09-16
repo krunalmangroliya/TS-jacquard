@@ -4,3 +4,7 @@ output/
 *.log
 public/samples/
 sample/
+.venv-ai/
+ai/__pycache__/
+ai/runs/
+ai/artifacts/

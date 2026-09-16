@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CanvasEditor, { type CompareMode, type EditorTool } from './CanvasEditor';
+import AiReview, { type AiView } from './AiReview';
+import { analyzeWithAi } from './ai-client';
+import type { AiResult } from './ai-types';
 import { replaceColor } from './editor';
 import { downloadBlob, encodeBmp, hexRgb, readImageFile, rgbHex, savePng } from './io';
 import { processImage } from './processor';
@@ -71,6 +74,11 @@ export default function App() {
   const [importHint, setImportHint] = useState('');
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const [aiProgress, setAiProgress] = useState<Progress | null>(null);
+  const [aiPreview, setAiPreview] = useState<AiResult | null>(null);
+  const [aiBaseline, setAiBaseline] = useState<IndexedImage | null>(null);
+  const [aiView, setAiView] = useState<AiView>('proposal');
+  const [aiError, setAiError] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [mode, setMode] = useState<CompareMode>('cleaned');
@@ -87,9 +95,13 @@ export default function App() {
   const continueButton = useRef<HTMLButtonElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const job = useRef<{ cancel: () => void } | null>(null);
+  const aiJob = useRef<{ cancel: () => void } | null>(null);
+  const aiTaskId = useRef(0);
   const taskId = useRef(0);
   const dragDepth = useRef(0);
-  const busy = loading || progress !== null || confirmation !== null;
+  const processingBusy = loading || progress !== null || confirmation !== null;
+  const aiReviewActive = aiProgress !== null || aiPreview !== null;
+  const busy = processingBusy || aiReviewActive;
   const askConfirmation = useCallback((title: string, description: string): Promise<boolean> => new Promise(resolve => {
     if (confirmResolve.current) { resolve(false); return; }
     confirmResolve.current = resolve;
@@ -125,11 +137,13 @@ export default function App() {
   const options: CleanupOptions = { width, height, read, pick, strength, flattenTexture, outlineColor, protectedColors, repeatX, repeatY };
   const edited = history.images[history.index] || null;
   const orientedSource = useMemo(() => source ? rotateSource(source, sourceOrientation) : null, [source, sourceOrientation]);
-  const displayedImage = edited || orientedSource;
+  const displayedImage = aiPreview ? aiView === 'before' ? aiBaseline : aiPreview.image : edited || orientedSource;
   const dirtySettings = !!resultOptions && (!optionsEqual(options, resultOptions) || resultOrientation !== sourceOrientation);
   const baseName = source?.name.replace(/\.[^.]+$/, '') || 'design';
   const outputName = `${baseName}-clean-r${resultOptions?.read || read}p${resultOptions?.pick || pick}`;
   const baseline = useMemo(() => result ? { ...result.image, pixels: result.baseline } : undefined, [result]);
+  const aiChangeKinds = useMemo(() => aiPreview?.changes.map(kind => kind === 2 ? 3 : kind), [aiPreview]);
+  const canvasMode: CompareMode = aiPreview ? aiView === 'changes' ? 'changes' : 'cleaned' : result ? mode : 'cleaned';
   const commit = useCallback((next: IndexedImage) => {
     setHistory(current => {
       if (current.images[current.index] === next) return current;
@@ -156,8 +170,10 @@ export default function App() {
     const prevent = (event: BeforeUnloadEvent) => { if (result) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', prevent); return () => window.removeEventListener('beforeunload', prevent);
   }, [result]);
-  useEffect(() => () => { job.current?.cancel(); taskId.current++; confirmResolve.current?.(false); confirmResolve.current = null; }, []);
+  useEffect(() => () => { job.current?.cancel(); taskId.current++; aiJob.current?.cancel(); aiTaskId.current++; confirmResolve.current?.(false); confirmResolve.current = null; }, []);
   const clearOutput = () => {
+    aiTaskId.current++; aiJob.current?.cancel(); aiJob.current = null;
+    setAiProgress(null); setAiPreview(null); setAiBaseline(null); setAiError('');
     setResult(null); setResultOptions(null); setResultOrientation(null); setHistory({ images: [], index: -1 }); setMode('cleaned'); setTool('pan'); setNotice(''); setPhysicalPreview(false);
   };
   const importFile = async (file: File, allowReset = false, preset?: SamplePreset) => {
@@ -230,8 +246,42 @@ export default function App() {
     finally { if (taskId.current === id) { setProgress(null); job.current = null; } }
   };
   const cancel = () => { taskId.current++; job.current?.cancel(); job.current = null; setProgress(null); setLoading(false); setNotice('Processing cancelled. Your original and previous result are unchanged.'); };
+  const runAi = async () => {
+    if (!edited || !resultOptions || busy || exporting || dirtySettings) return;
+    const input = edited;
+    const id = ++aiTaskId.current;
+    setAiBaseline(input); setAiError(''); setNotice(''); setTool('pan'); setMode('cleaned');
+    setAiProgress({ stage: 'Preparing the AI trial', percent: 0 });
+    try {
+      const processing = analyzeWithAi(input, { ...resultOptions, protectedColors: [...resultOptions.protectedColors] }, next => { if (aiTaskId.current === id) setAiProgress(next); });
+      aiJob.current = processing;
+      const next = await processing.promise;
+      if (aiTaskId.current !== id) return;
+      if (next.image.width !== input.width || next.image.height !== input.height || next.image.pixels.length !== input.pixels.length || next.changes.length !== input.pixels.length || next.image.palette.length !== input.palette.length || next.image.palette.some((color, index) => color.some((channel, c) => channel !== input.palette[index][c]))) throw new Error('The AI trial returned an incompatible image. Your canvas is unchanged.');
+      setAiPreview(next); setAiView('proposal');
+    } catch (reason) {
+      if (aiTaskId.current === id) { setAiError(message(reason)); setAiBaseline(null); }
+    } finally {
+      if (aiTaskId.current === id) { setAiProgress(null); aiJob.current = null; }
+    }
+  };
+  const cancelAi = () => {
+    aiTaskId.current++; aiJob.current?.cancel(); aiJob.current = null;
+    setAiProgress(null); setAiPreview(null); setAiBaseline(null); setAiError('');
+    setNotice('AI trial cancelled. Your canvas is unchanged.');
+  };
+  const discardAi = () => {
+    setAiPreview(null); setAiBaseline(null); setAiError(''); setMode('cleaned');
+    setNotice('AI preview closed. Your canvas is unchanged.');
+  };
+  const applyAi = () => {
+    if (!aiPreview || !aiBaseline || edited !== aiBaseline || aiProgress) return;
+    commit(aiPreview.image);
+    setAiPreview(null); setAiBaseline(null); setAiError(''); setMode('cleaned');
+    setNotice('AI changes applied. Undo restores the canvas from before this trial.');
+  };
   const exportFile = async (format: 'bmp' | 'png') => {
-    if (!edited || !resultOptions) return;
+    if (!edited || !resultOptions || busy || exporting) return;
     setExporting(true); setError('');
     try {
       const receipt = format === 'bmp' ? await downloadBlob(new Blob([new Uint8Array(encodeBmp(edited, resultOptions.read, resultOptions.pick))], { type: 'image/bmp' }), `${outputName}.bmp`) : await savePng(edited, `${outputName}.png`);
@@ -240,7 +290,7 @@ export default function App() {
     finally { setExporting(false); }
   };
   const addColor = () => {
-    if (!edited || edited.palette.length >= 256) return;
+    if (!edited || edited.palette.length >= 256 || busy) return;
     const rgb = hexRgb(newColor);
     const existing = edited.palette.findIndex(c => c.every((v, i) => v === rgb[i]));
     if (existing >= 0) { setSelectedColor(existing); return; }
@@ -260,7 +310,7 @@ export default function App() {
         <div className="panel-heading"><span className="eyebrow">YOUR DESIGN, REFINED</span><h1>Prepare your artwork<span>.</span></h1><p>Precise pixels. Ready for the next weave.</p></div>
         <section className="setting-section source-section">
           <div className="section-title"><span className="step">01</span><h2>Source artwork</h2><span className="section-side">PNG / BMP</span></div>
-          <input ref={fileInput} type="file" accept=".png,.bmp,image/png,image/bmp" className="visually-hidden" aria-label="Upload PNG or BMP artwork" onChange={event => { const file = event.target.files?.[0]; if (file) void importFile(file); event.target.value = ''; }} />
+          <input ref={fileInput} type="file" disabled={busy} accept=".png,.bmp,image/png,image/bmp" className="visually-hidden" aria-label="Upload PNG or BMP artwork" onChange={event => { const file = event.target.files?.[0]; if (file) void importFile(file); event.target.value = ''; }} />
           {source ? <div className="source-file"><Thumbnail image={source} /><div><strong title={source.name}>{source.name}</strong><span>{source.width.toLocaleString()} × {source.height.toLocaleString()} px</span><span>{source.palette.length} colors{source.originalColors > source.palette.length ? ` · reduced from ${source.originalColors.toLocaleString()}` : ' · palette preserved'}</span><button className="text-button" disabled={busy} onClick={() => fileInput.current?.click()}>Replace artwork <span>↗</span></button></div></div> : <button className="upload-zone" disabled={busy} onClick={() => fileInput.current?.click()}><span className="upload-icon"><Icon name="upload" size={23} /></span><strong>Upload artwork</strong><span>Choose a file or drop it anywhere</span><small>PNG or BMP · up to {MAX_SOURCE_PIXELS / 1_000_000} megapixels</small></button>}
           {source && importHint && <p className="field-hint import-hint">{importHint}</p>}
           {source && <div className="source-orientation"><label>Source orientation<select value={sourceOrientation} disabled={busy} onChange={event => setSourceOrientation(Number(event.target.value) as SourceOrientation)}><option value={0}>Original orientation</option><option value={90}>Rotate 90° clockwise</option><option value={180}>Rotate 180°</option><option value={270}>Rotate 270° clockwise</option></select></label><p className="field-hint">Rotates the input before cleanup. The output grid stays as entered.{result && ' Reprocess to apply orientation changes.'}</p>{activeSampleId === '42850-patto' && <p className="field-hint orientation-advice">This sample's sized file uses a rotated layout. Select 90° clockwise and review the source preview before processing.</p>}</div>}
@@ -302,21 +352,23 @@ export default function App() {
         {error && <div className="message-banner error-banner" role="alert"><span>{error}{pendingFile && ' Open Import color options to choose a palette reduction and retry if needed.'}</span><button aria-label="Dismiss error" onClick={() => setError('')}><Icon name="close" size={16} /></button></div>}
         {notice && <div className="message-banner notice-banner" role="status"><Icon name="check" size={16} /><span>{notice}</span><button aria-label="Dismiss notice" onClick={() => setNotice('')}><Icon name="close" size={16} /></button></div>}
         <div className="canvas-toolbar"><div className="view-tabs" aria-label="Comparison mode">{(['original', 'cleaned', 'changes'] as const).map((view, index) => <button key={view} disabled={!result || busy} className={(result ? mode === view : view === 'original') ? 'active' : ''} onClick={() => setMode(view)} title={`${view === 'original' ? 'Original resized to the output grid' : view === 'changes' ? 'All changed pixels, including your edits' : 'Cleaned output with your edits'} (${index + 1})`}>{view === 'original' ? 'Sized original' : view === 'cleaned' ? 'Cleaned' : 'Changes'}{view === 'changes' && <i />}</button>)}</div><div className="toolbar-tools"><button disabled={history.index <= 0 || busy} onClick={undo} title="Undo (Ctrl Z)" aria-label="Undo"><Icon name="undo" /></button><button disabled={history.index >= history.images.length - 1 || busy} onClick={redo} title="Redo (Ctrl Shift Z)" aria-label="Redo"><Icon name="redo" /></button><span className="tool-divider" /><label className="physical-toggle"><input type="checkbox" checked={physicalPreview} disabled={!displayedImage || busy} onChange={event => setPhysicalPreview(event.target.checked)} />Cloth proportions</label></div></div>
-        <div className="canvas-body">
-          {displayedImage ? <><div className="floating-tools" role="toolbar" aria-label="Canvas tools">{([{ id: 'pan', label: 'Pan', shortcut: 'H' }, { id: 'fill', label: 'Fill connected region', shortcut: 'F' }, { id: 'pencil', label: 'One-pixel pencil', shortcut: 'B' }, { id: 'pick', label: 'Eyedropper', shortcut: 'I' }] as const).map(item => <button className={tool === item.id ? 'active' : ''} disabled={busy || (!edited || mode !== 'cleaned') && (item.id === 'fill' || item.id === 'pencil')} onClick={() => setTool(item.id)} title={`${item.label} (${item.shortcut})`} aria-label={item.label} aria-pressed={tool === item.id} key={item.id}><Icon name={item.id} /></button>)}</div><CanvasEditor image={displayedImage} baseline={baseline} automaticImage={result?.image} changeKinds={result?.changes} mode={result ? mode : 'cleaned'} tool={tool} selectedColor={safeSelectedColor} editable={!!edited && !busy} physical={physicalPreview} read={resultOptions?.read || orientedSource?.dpiX || 1} pick={resultOptions?.pick || orientedSource?.dpiY || 1} onChange={commit} onPick={setSelectedColor} /></> : <div className="empty-canvas"><div className="empty-motif"><span /><span /><span /><span /><div><Icon name="sparkle" size={28} /></div></div><span className="eyebrow">FROM ARTWORK TO WEAVE-READY PIXELS</span><h3>Start with your artwork.</h3><p>Set the weave dimensions. Refine the pixels.<br />Make the final color decisions yours.</p><button className="empty-upload" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="upload" size={17} /> Choose PNG or BMP <Icon name="arrow" size={17} /></button><div className="sample-divider"><span />or explore a real design<span /></div><button className="sample-card" disabled={busy} onClick={() => void loadSample()}><img src="/samples/pallu-source.png" alt="Floral pallu sample with dancer motifs" /><div><strong>Try the pallu sample</strong><span>7 colors · R96 / P52 · 8 × 19 in</span></div><Icon name="arrow" size={18} /></button><div className="privacy-note"><Icon name="shield" size={14} /> Your artwork stays on this device. No cloud uploads.</div></div>}
+        <div className={`canvas-body ${aiReviewActive ? "ai-preview-active" : ""}`}>
+          {aiReviewActive && <div className="ai-canvas-label">{aiProgress ? "AI TRIAL RUNNING · CANVAS UNCHANGED" : aiView === "before" ? "BEFORE AI" : aiView === "changes" ? "AI CHANGES ONLY · NOT APPLIED" : "AI PROPOSAL · NOT APPLIED"}</div>}
+          {displayedImage ? <><div className="floating-tools" role="toolbar" aria-label="Canvas tools">{([{ id: 'pan', label: 'Pan', shortcut: 'H' }, { id: 'fill', label: 'Fill connected region', shortcut: 'F' }, { id: 'pencil', label: 'One-pixel pencil', shortcut: 'B' }, { id: 'pick', label: 'Eyedropper', shortcut: 'I' }] as const).map(item => <button className={tool === item.id ? 'active' : ''} disabled={(busy && !(aiReviewActive && item.id === 'pan')) || (!edited || mode !== 'cleaned') && (item.id === 'fill' || item.id === 'pencil')} onClick={() => setTool(item.id)} title={`${item.label} (${item.shortcut})`} aria-label={item.label} aria-pressed={tool === item.id} key={item.id}><Icon name={item.id} /></button>)}</div><CanvasEditor image={displayedImage} baseline={aiPreview ? aiBaseline || undefined : baseline} automaticImage={aiPreview?.image || result?.image} changeKinds={aiPreview ? aiChangeKinds : result?.changes} mode={canvasMode} tool={tool} selectedColor={safeSelectedColor} editable={!!edited && !busy} physical={physicalPreview} read={resultOptions?.read || orientedSource?.dpiX || 1} pick={resultOptions?.pick || orientedSource?.dpiY || 1} onChange={commit} onPick={setSelectedColor} /></> : <div className="empty-canvas"><div className="empty-motif"><span /><span /><span /><span /><div><Icon name="sparkle" size={28} /></div></div><span className="eyebrow">FROM ARTWORK TO WEAVE-READY PIXELS</span><h3>Start with your artwork.</h3><p>Set the weave dimensions. Refine the pixels.<br />Make the final color decisions yours.</p><button className="empty-upload" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="upload" size={17} /> Choose PNG or BMP <Icon name="arrow" size={17} /></button><div className="sample-divider"><span />or explore a real design<span /></div><button className="sample-card" disabled={busy} onClick={() => void loadSample()}><img src="/samples/pallu-source.png" alt="Floral pallu sample with dancer motifs" /><div><strong>Try the pallu sample</strong><span>7 colors · R96 / P52 · 8 × 19 in</span></div><Icon name="arrow" size={18} /></button><div className="privacy-note"><Icon name="shield" size={14} /> Your artwork stays on this device. No cloud uploads.</div></div>}
           {(progress || loading) && <div className="processing-overlay"><div className="processing-card"><div className="processing-symbol"><Icon name="sparkle" size={30} /></div><span className="eyebrow">{loading ? 'READING ARTWORK' : 'REFINING YOUR DESIGN'}</span><h3>{loading ? 'Building your palette…' : progress!.stage}</h3><div className="progress-track"><i style={{ width: `${loading ? 30 : Math.max(0, Math.min(100, progress!.percent))}%` }} /></div><p>{loading ? 'Reading pixels locally in your browser' : `${Math.round(progress!.percent)}% · processing the original source`}</p>{progress && <button className="small-button" onClick={cancel}>Cancel processing</button>}</div></div>}
         </div>
-        <div className="canvas-bottom"><span className="canvas-instruction">{!source ? 'A considered finish, down to the last pixel.' : mode !== 'cleaned' && result ? 'Inspect this view · switch to Cleaned to edit' : tool === 'fill' ? 'Choose a color, then click a connected region to fill' : tool === 'pencil' ? 'Drag to draw a continuous one-pixel stroke' : tool === 'pick' ? 'Click any pixel to pick its palette color' : 'Scroll to zoom · drag to pan · hold Space with any tool'}</span>{source && <span className="pixel-badge"><i /> ZOOM FOR PIXEL INSPECTION</span>}</div>
-        <div className="output-bar"><div className="output-status"><span className={`status-dot ${result ? 'ready' : ''}`} /><div><strong>{result ? dirtySettings ? 'Settings changed' : 'Ready for your finishing touch' : 'Your next weave starts here'}</strong><span>{result ? dirtySettings ? 'Reprocess to apply the new recipe. Downloads use the current canvas.' : `${result.stats.changedPixels.toLocaleString()} pixels changed · ${(result.stats.elapsedMs / 1000).toFixed(1)}s · review fine details before use` : 'Cleaned, indexed BMP output for NedGraphics'}</span></div></div><div className="output-actions">{result && <button className="new-output-button" disabled={busy} onClick={async () => { if (await askConfirmation('Start a new output?', 'Start again from the original source with a fresh canvas. Download the current result first to keep it.')) clearOutput(); }}><Icon name="reset" size={15} /> New output</button>}<button className="png-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('png')}>PNG</button><button className="export-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('bmp')}><Icon name="download" size={17} />{exporting ? 'Preparing…' : 'Export BMP'}</button></div></div>
+        <div className="canvas-bottom"><span className="canvas-instruction">{aiReviewActive ? 'AI trial · pan and zoom to review · apply or discard the proposal to continue editing' : !source ? 'A considered finish, down to the last pixel.' : mode !== 'cleaned' && result ? 'Inspect this view · switch to Cleaned to edit' : tool === 'fill' ? 'Choose a color, then click a connected region to fill' : tool === 'pencil' ? 'Drag to draw a continuous one-pixel stroke' : tool === 'pick' ? 'Click any pixel to pick its palette color' : 'Scroll to zoom · drag to pan · hold Space with any tool'}</span>{source && <span className="pixel-badge"><i /> ZOOM FOR PIXEL INSPECTION</span>}</div>
+        <div className="output-bar"><div className="output-status"><span className={`status-dot ${result ? 'ready' : ''}`} /><div><strong>{aiPreview ? 'Review the AI proposal' : aiProgress ? 'AI trial running' : result ? dirtySettings ? 'Settings changed' : 'Ready for your finishing touch' : 'Your next weave starts here'}</strong><span>{aiReviewActive ? 'Your committed canvas is unchanged. Downloads resume after this review.' : result ? dirtySettings ? 'Reprocess to apply the new recipe. Downloads use the current canvas.' : `${result.stats.changedPixels.toLocaleString()} pixels changed · ${(result.stats.elapsedMs / 1000).toFixed(1)}s · review fine details before use` : 'Cleaned, indexed BMP output for NedGraphics'}</span></div></div><div className="output-actions">{result && <button className="new-output-button" disabled={busy} onClick={async () => { if (await askConfirmation('Start a new output?', 'Start again from the original source with a fresh canvas. Download the current result first to keep it.')) clearOutput(); }}><Icon name="reset" size={15} /> New output</button>}<button className="png-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('png')}>PNG</button><button className="export-button" disabled={!edited || busy || exporting} onClick={() => void exportFile('bmp')}><Icon name="download" size={17} />{exporting ? 'Preparing…' : 'Export BMP'}</button></div></div>
       </main>
-      {displayedImage && <aside className="inspector-panel"><div className="inspector-heading"><span className="eyebrow">FINISHING TOOLS</span><h2>Your color palette<span>{activePalette.length}</span></h2><p>{edited ? 'Select a color, then fill a region or draw.' : 'Source colors. Process the artwork to start editing.'}</p></div><div className="palette-grid">{activePalette.map((color, index) => <button key={index} className={`palette-swatch ${safeSelectedColor === index ? 'active' : ''}`} onClick={() => setSelectedColor(index)} style={{ '--swatch': rgbHex(color) } as React.CSSProperties} title={`Color ${index + 1}: ${rgbHex(color).toUpperCase()}`} aria-label={`Select color ${index + 1}, ${rgbHex(color)}`} aria-pressed={safeSelectedColor === index}><span>{safeSelectedColor === index && <Icon name="check" size={18} />}</span><small>{String(index + 1).padStart(2, '0')}</small></button>)}</div><div className="selected-color"><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><div><span>SELECTED INK</span><strong>{activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]).toUpperCase() : '—'}</strong></div><small>{safeSelectedColor + 1}</small></div>
+      {displayedImage && <aside className="inspector-panel">
+        {result && edited && <AiReview progress={aiProgress} result={aiPreview} view={aiView} error={aiError} disabled={processingBusy || exporting} settingsChanged={dirtySettings} onRun={() => void runAi()} onCancel={cancelAi} onApply={applyAi} onDiscard={discardAi} onView={setAiView} />}<div className="inspector-heading"><span className="eyebrow">FINISHING TOOLS</span><h2>Your color palette<span>{activePalette.length}</span></h2><p>{edited ? 'Select a color, then fill a region or draw.' : 'Source colors. Process the artwork to start editing.'}</p></div><div className="palette-grid">{activePalette.map((color, index) => <button key={index} disabled={busy} className={`palette-swatch ${safeSelectedColor === index ? 'active' : ''}`} onClick={() => setSelectedColor(index)} style={{ '--swatch': rgbHex(color) } as React.CSSProperties} title={`Color ${index + 1}: ${rgbHex(color).toUpperCase()}`} aria-label={`Select color ${index + 1}, ${rgbHex(color)}`} aria-pressed={safeSelectedColor === index}><span>{safeSelectedColor === index && <Icon name="check" size={18} />}</span><small>{String(index + 1).padStart(2, '0')}</small></button>)}</div><div className="selected-color"><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><div><span>SELECTED INK</span><strong>{activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]).toUpperCase() : '—'}</strong></div><small>{safeSelectedColor + 1}</small></div>
         <div className="inspector-section"><h3>Add a color</h3><div className="add-color"><input type="color" aria-label="New palette color" value={newColor} disabled={!edited || busy || activePalette.length >= 256} onChange={event => setNewColor(event.target.value)} /><span>{newColor.toUpperCase()}</span><button disabled={!edited || busy || activePalette.length >= 256} onClick={addColor}>Add</button></div>{activePalette.length >= 256 && <p className="field-hint">Palette full: 256 colors.</p>}</div>
         <div className="inspector-section"><h3>Replace across the design</h3><p>Swap every pixel of one color with the selected ink.</p><label>Replace color<select disabled={!edited || busy} value={Math.min(replaceFrom, activePalette.length - 1)} onChange={event => setReplaceFrom(Number(event.target.value))}>{activePalette.map((color, index) => <option key={index} value={index}>Color {index + 1} · {rgbHex(color).toUpperCase()}</option>)}</select></label><div className="replace-preview"><i style={{ background: activePalette[Math.min(replaceFrom, activePalette.length - 1)] ? rgbHex(activePalette[Math.min(replaceFrom, activePalette.length - 1)]) : '#000' }} /><Icon name="arrow" size={16} /><i style={{ background: activePalette[safeSelectedColor] ? rgbHex(activePalette[safeSelectedColor]) : '#000' }} /><span>Color {safeSelectedColor + 1}</span></div><button className="replace-button" disabled={!edited || busy || replaceFrom === safeSelectedColor || mode !== 'cleaned'} onClick={() => edited && commit(replaceColor(edited, replaceFrom, safeSelectedColor))}>Replace all occurrences</button><p className="field-hint">For just one connected area, use the fill tool.</p></div>
-        {result && <div className="inspector-section result-details"><h3>Cleanup report</h3><dl><div><dt>Changed pixels</dt><dd>{result.stats.changedPixels.toLocaleString()}</dd></div><div><dt>Speck fragments</dt><dd>{result.stats.specksRemoved.toLocaleString()}</dd></div><div><dt>Line pixels added</dt><dd>{result.stats.gapsRepaired.toLocaleString()}</dd></div><div><dt>Texture pixels cleaned</dt><dd>{result.stats.texturePixels.toLocaleString()}</dd></div>{result.stats.linePaths !== undefined && <div><dt>Traced line paths</dt><dd>{result.stats.linePaths.toLocaleString()}</dd></div>}</dl><p className="field-hint">Automatic cleanup only. Counts do not measure design quality.</p>{result.warnings.length > 0 && <div className="review-notes"><strong>Review notes</strong>{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}</div>}
+        {result && <div className="inspector-section result-details"><h3>Cleanup report</h3><dl><div><dt>Changed pixels</dt><dd>{result.stats.changedPixels.toLocaleString()}</dd></div><div><dt>Speck fragments</dt><dd>{result.stats.specksRemoved.toLocaleString()}</dd></div><div><dt>Line pixels added</dt><dd>{result.stats.gapsRepaired.toLocaleString()}</dd></div><div><dt>Texture pixels cleaned</dt><dd>{result.stats.texturePixels.toLocaleString()}</dd></div>{result.stats.linePaths !== undefined && <div><dt>Traced line paths</dt><dd>{result.stats.linePaths.toLocaleString()}</dd></div>}</dl><p className="field-hint">Rule cleanup only; AI and canvas edits are separate. Counts do not measure design quality.</p>{result.warnings.length > 0 && <div className="review-notes"><strong>Review notes</strong>{result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div>}</div>}
         <div className="inspector-tip"><Icon name="shield" size={18} /><p><strong>You direct the finish.</strong>Automatic cleanup preserves the palette. Recolor any region here before exporting.</p></div>
       </aside>}
     </div>
-    {dragging && !confirmation && <div className="drop-overlay"><Icon name="upload" size={44} /><h2>Drop your artwork here</h2><p>PNG or BMP · processed on your device</p></div>}
+    {dragging && !busy && <div className="drop-overlay"><Icon name="upload" size={44} /><h2>Drop your artwork here</h2><p>PNG or BMP · processed on your device</p></div>}
     {confirmation && <div className="confirmation-overlay" onKeyDown={event => {
       event.stopPropagation();
       if (event.key === 'Escape') { event.preventDefault(); answerConfirmation(false); }

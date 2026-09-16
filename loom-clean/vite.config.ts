@@ -12,4 +12,5 @@ export default defineConfig({
     watch: { ignored: ['**/output/**', '**/sample/**', '**/samples/**', '**/*.{bmp,BMP,png,PNG}'] },
   },
   build: { target: 'es2022' },
+  worker: { format: 'es' },
 });

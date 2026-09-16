@@ -1,0 +1,6 @@
+# PyTorch CPU wheel installed from https://download.pytorch.org/whl/cpu
+torch==2.14.0
+numpy==2.3.5
+Pillow==12.3.0
+onnx==1.22.0
+onnxruntime==1.30.0
