@@ -56,7 +56,7 @@ export async function verifyBrowserDeterminism(cases: BrowserDeterminismCase[]):
             const { master, profile, sizeInput, rules } = data;
             const topology = materializeGeometry(master);
             const size = resolveSize(master.bounds, profile, sizeInput);
-            const result = render(topology.geometry, topology.faces, master.bounds, master.palette, size.widthPx, size.heightPx, rules, [], master.repeat);
+            const result = render(topology.geometry, topology.faces, master.bounds, master.palette, size.widthPx, size.heightPx, rules, [], master.repeat, master.raster);
             const bmp = encodeBmp(result.grid, size.widthPx, size.heightPx, master.palette, profile);
             self.postMessage({ ok: true, buffer: bmp.buffer }, [bmp.buffer]);
           } catch (error) {

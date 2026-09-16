@@ -30,7 +30,7 @@ export function fillPlaceholders(input: Master, preparedFaces?:Face[]): Master {
   const master = validateMaster(JSON.parse(JSON.stringify(input)));
   const faces = preparedFaces ?? buildPlanarMap(master.geometry, master.bounds, master.repeat).faces;
   // Keep the default outline visible against demonstration fills. Designers can
-  // still assign any of the same six entries to a face through normal edits.
+  // still assign any of the palette entries to a face through normal edits.
   const fillIndices=master.palette.entries.filter(entry=>entry.index!==0&&entry.name.toLowerCase()!=='outline').map(entry=>entry.index);
   if(!fillIndices.length&&master.palette.entries.length>1)fillIndices.push(1);
   const seamColors = new Map<string, number>(); let next = 0;
@@ -51,7 +51,7 @@ export function renderMaster(input: Master, profile: MachineProfile, sizeInput: 
   const topology = prepared ?? materializeGeometry(master);
   const size = resolveSize(master.bounds, profile, sizeInput);
   const started = performance.now();
-  const result = render(topology.geometry, topology.faces, master.bounds, master.palette, size.widthPx, size.heightPx, rules, overrides, master.repeat);
+  const result = render(topology.geometry, topology.faces, master.bounds, master.palette, size.widthPx, size.heightPx, rules, overrides, master.repeat, master.raster);
   const renderMs = performance.now() - started;
   result.report.warnings.push(...topology.warnings, ...size.warnings);
   const ignoredOverrides=overrides.filter(p=>p.x<0||p.y<0||p.x>=size.widthPx||p.y>=size.heightPx).length;

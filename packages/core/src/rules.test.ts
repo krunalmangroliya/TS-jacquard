@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyRules, RULE_BITS } from './rules';
 import { DEFAULT_PALETTE } from './types';
-import type { RuleConfig } from './types';
+import type { Palette, RuleConfig } from './types';
 
 const off: RuleConfig = { connectVisibleEdges4: false, minThicknessPx: 0, minRegionPx: 0, removeCheckerboard: false };
 const clipped = { type: 'half-drop' } as const;
@@ -90,6 +90,18 @@ describe('deterministic indexed cleanup', () => {
     const grid = new Uint8Array(64); for (const p of [27, 28, 35, 36]) grid[p] = 1;
     const result = applyRules(grid, 8, 8, DEFAULT_PALETTE, { ...off, minThicknessPx: 2 });
     expect(result.grid).toEqual(grid);
+  });
+
+  it('applies thickness cleanup to color255 exactly like other colors, with no empty-sentinel collision', () => {
+    const palette: Palette = { entries: Array.from({ length: 256 }, (_, index) => ({ index, name: String(index), displayRgb: [index, index, index], exportRgb: [index, index, index] })) };
+    const high = new Uint8Array(144), low = new Uint8Array(144);
+    for (const p of [26, 65, 66, 77, 78]) { high[p] = 255; low[p] = 1; }
+    const cfg = { ...off, minThicknessPx: 2 };
+    const cleaned = applyRules(high, 12, 12, palette, cfg), comparison = applyRules(low, 12, 12, DEFAULT_PALETTE, cfg);
+    expect([...cleaned.grid]).toEqual([...comparison.grid].map(color => color === 1 ? 255 : color));
+    expect(cleaned.grid[26]).toBe(0); expect(cleaned.grid[65]).toBe(255);
+    expect(cleaned.changedPixelsByRule.minThickness).toBe(1);
+    expect(applyRules(high, 12, 12, palette, { ...cfg, protectedColorIndices: [255] }).grid).toEqual(high);
   });
 
   it('removes checkerboards using surrounding counts and respects visible pixels', () => {

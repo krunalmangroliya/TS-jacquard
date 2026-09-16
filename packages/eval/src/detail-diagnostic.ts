@@ -26,7 +26,7 @@ async function browserExecutable(): Promise<string> {
 export async function createDetailDiagnostic(reviewDirectory: string, widthPx = 2400, requestedCrop?: DiagnosticCrop) {
   if (!Number.isSafeInteger(widthPx) || widthPx < 1) throw new Error('Diagnostic width must be a positive integer.');
   const directory = path.resolve(reviewDirectory), originalBytes = await readFile(path.join(directory, 'master.json'));
-  // The normal master validator also enforces the six-color design limit.
+  // The normal master validator also enforces the indexed palette limit.
   const original = validateMaster(JSON.parse(originalBytes.toString('utf8')));
   await access(path.join(directory, 'source.png'));
   const files = (await readdir(directory)).filter(name => /^size-.*\.json$/i.test(name)).sort();

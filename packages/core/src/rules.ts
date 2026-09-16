@@ -1,7 +1,7 @@
 import type { Palette, Repeat, RuleConfig, Vec2 } from './types';
 import { DEFAULT_RULES, MAX_COLORS } from './types';
 
-export const RULE_BITS = { connectVisibleEdges4: 1, minThickness: 2, minRegion: 4, removeCheckerboard: 8 } as const;
+export const RULE_BITS = { connectVisibleEdges4: 1, minThickness: 2, minRegion: 4, removeCheckerboard: 8, preserveOutline: 16, repairOutlineGaps: 32 } as const;
 export interface RulesResult {
   grid: Uint8Array;
   changedPixelsByRule: Record<string, number>;
@@ -15,24 +15,51 @@ export function validateRuleGrid(grid: Uint8Array, w: number, h: number, palette
     throw new Error('Grid dimensions must be positive integers, match its buffer, and contain at most 100 million pixels.');
   }
   if (palette.entries.length < 1 || palette.entries.length > MAX_COLORS || palette.entries.some((p, i) => p.index !== i)) {
-    throw new Error('Palette must contain 1–6 contiguous indices beginning at 0.');
+    throw new Error(`Palette must contain 1–${MAX_COLORS} contiguous indices beginning at 0.`);
   }
   for (const color of grid) if (color >= palette.entries.length) throw new Error(`Pixel color ${color} is outside the palette.`);
 }
 
 interface Components { labels: Int32Array; order: Int32Array; starts: number[]; sizes: number[] }
 
+/** Palette-dependent validation shared by renderers and persistence boundaries. */
+export function validateRuleConfig(cfg: RuleConfig, palette: Palette): void {
+  if (!Number.isSafeInteger(cfg.minRegionPx) || cfg.minRegionPx < 0 || !Number.isSafeInteger(cfg.minThicknessPx) || cfg.minThicknessPx < 0 || cfg.minThicknessPx > 32) throw new Error('Rule thresholds must be nonnegative integers; minThicknessPx must be at most 32.');
+  if (typeof cfg.removeCheckerboard !== 'boolean' || typeof cfg.connectVisibleEdges4 !== 'boolean' || (cfg.repairOutlineGaps !== undefined && typeof cfg.repairOutlineGaps !== 'boolean')) throw new Error('Cleanup switches must be booleans.');
+  const validColor = (color: number): boolean => Number.isInteger(color) && color >= 0 && color < palette.entries.length;
+  if (cfg.protectedColorIndices?.some(color => !validColor(color))) throw new Error('Protected colors must be valid palette indices.');
+  if (cfg.cleanupColorIndices?.some(color => !validColor(color))) throw new Error('Cleanup colors must be valid palette indices.');
+  if (cfg.outlineColorIndex !== undefined && !validColor(cfg.outlineColorIndex)) throw new Error('Outline color must be a valid palette index.');
+  if (cfg.rasterResize !== undefined && cfg.rasterResize !== 'nearest' && cfg.rasterResize !== 'preserve-outline') throw new Error('Unsupported raster resize mode.');
+  if (cfg.outlineAlgorithm !== undefined && cfg.outlineAlgorithm !== 'legacy' && cfg.outlineAlgorithm !== 'conservative') throw new Error('Unsupported outline algorithm.');
+  if (cfg.repairColorIndices !== undefined && (!Array.isArray(cfg.repairColorIndices) || cfg.repairColorIndices.length < 1 || cfg.repairColorIndices.length > 8 || new Set(cfg.repairColorIndices).size !== cfg.repairColorIndices.length || cfg.repairColorIndices.some(color => !validColor(color)))) throw new Error('Gap repair needs 1–8 unique valid line colors.');
+  if (cfg.repairColorIndices !== undefined && cfg.outlineAlgorithm !== 'conservative') throw new Error('Selected gap-repair colors require the conservative outline algorithm.');
+  if ((cfg.rasterResize === 'preserve-outline' || (cfg.repairOutlineGaps && !cfg.repairColorIndices)) && cfg.outlineColorIndex === undefined) throw new Error('Choose an outline color before enabling outline preservation or repair.');
+  const region = cfg.cleanupRegion;
+  if (region && (![region.x, region.y, region.w, region.h].every(Number.isFinite) || region.x < 0 || region.y < 0 || region.w <= 0 || region.h <= 0 || region.x + region.w > 1 || region.y + region.h > 1)) throw new Error('Cleanup region must be a positive normalized rectangle inside the image.');
+}
+
+/** Freeze eligibility from the original sampled colors, before any rule changes them. */
+export function cleanupScopeMask(input: Uint8Array, w: number, h: number, cfg: RuleConfig): Uint8Array {
+  const mask = new Uint8Array(input.length), selected = cfg.cleanupColorIndices === undefined ? undefined : new Set(cfg.cleanupColorIndices), protectedColors = new Set(cfg.protectedColorIndices ?? []), region = cfg.cleanupRegion;
+  for (let p = 0; p < input.length; p++) {
+    if (protectedColors.has(input[p]) || (selected && !selected.has(input[p]))) continue;
+    const x = (p % w + 0.5) / w, y = (Math.floor(p / w) + 0.5) / h;
+    if (!region || (x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h)) mask[p] = 1;
+  }
+  return mask;
+}
+
 /** Snapshot-based cleanup. The input, visible mask, and configuration are never mutated. */
 export function applyRules(
   input: Uint8Array, w: number, h: number, palette: Palette, cfg: RuleConfig = DEFAULT_RULES,
-  visibleMask: Uint8Array = new Uint8Array(input.length), repeat: Repeat = { type: 'straight' }, overrideMask: Uint8Array = new Uint8Array(input.length),
+  visibleMask: Uint8Array = new Uint8Array(input.length), repeat: Repeat = { type: 'straight' }, overrideMask: Uint8Array = new Uint8Array(input.length), scopeMask?: Uint8Array,
 ): RulesResult {
   validateRuleGrid(input, w, h, palette);
   if (visibleMask.length !== input.length || overrideMask.length !== input.length) throw new Error('Rule masks must match the grid.');
-  if (!Number.isSafeInteger(cfg.minRegionPx) || cfg.minRegionPx < 0 || !Number.isSafeInteger(cfg.minThicknessPx) || cfg.minThicknessPx < 0 || cfg.minThicknessPx > 32) {
-    throw new Error('Rule thresholds must be nonnegative integers; minThicknessPx must be at most 32.');
-  }
-  if (cfg.protectedColorIndices?.some(color => !Number.isInteger(color) || color < 0 || color >= palette.entries.length)) throw new Error('Protected colors must be valid palette indices.');
+  validateRuleConfig(cfg, palette);
+  if (scopeMask && scopeMask.length !== input.length) throw new Error('Cleanup scope must match the grid.');
+  const eligible = scopeMask ?? cleanupScopeMask(input, w, h, cfg);
   const n = input.length, periodic = repeat.type === 'straight';
   let grid: Uint8Array = input.slice();
   const visible = visibleMask.slice(), protectedColors = new Set(cfg.protectedColorIndices ?? []), preservedRegionMask = new Uint8Array(n);
@@ -44,7 +71,7 @@ export function applyRules(
     if (periodic) return ((y % h + h) % h) * w + ((x % w + w) % w);
     return x < 0 || y < 0 || x >= w || y >= h ? -1 : y * w + x;
   };
-  const immutable = (p: number, source: Uint8Array): boolean => !!visible[p] || !!preservedRegionMask[p] || !!overrideMask[p] || protectedColors.has(source[p]);
+  const immutable = (p: number, source: Uint8Array): boolean => !eligible[p] || !!visible[p] || !!preservedRegionMask[p] || !!overrideMask[p] || protectedColors.has(source[p]);
   const neighbors4 = (p: number): number[] => {
     const x = p % w, y = Math.floor(p / w);
     return [at(x - 1, y), at(x + 1, y), at(x, y - 1), at(x, y + 1)];
@@ -104,7 +131,9 @@ export function applyRules(
 
   if (cfg.minThicknessPx > 1) {
     const k = cfg.minThicknessPx, low = -Math.floor(k / 2), high = low + k - 1, source = grid, next = source.slice();
-    const eroded = new Uint8Array(n).fill(255);
+    // Store membership separately from color: every byte value, including 255,
+    // is a real palette index and cannot serve as an empty sentinel.
+    const eroded = new Uint8Array(n);
     for (let p = 0; p < n; p++) {
       const x = p % w, y = Math.floor(p / w), color = source[p];
       let full = true;
@@ -112,7 +141,7 @@ export function applyRules(
         const q = at(x + dx, y + dy);
         if (q < 0 || source[q] !== color) { full = false; break; }
       }
-      if (full) eroded[p] = color;
+      if (full) eroded[p] = 1;
     }
     for (let p = 0; p < n; p++) {
       if (immutable(p, source)) continue;
@@ -120,7 +149,7 @@ export function applyRules(
       let survives = false;
       for (let dy = low; dy <= high && !survives; dy++) for (let dx = low; dx <= high; dx++) {
         const q = at(x - dx, y - dy);
-        if (q >= 0 && eroded[q] === color) { survives = true; break; }
+        if (q >= 0 && eroded[q] && source[q] === color) { survives = true; break; }
       }
       if (survives) continue;
       const counts = new Int32Array(palette.entries.length);

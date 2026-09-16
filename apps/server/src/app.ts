@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { DesignRecord, DesignSummary, ExportSummary, VersionSummary } from '../../../packages/app-model/src/index';
-import { DEFAULT_RULES } from '../../../packages/core/src/types';
+import { DEFAULT_RULES, DEFAULT_RASTER_RULES } from '../../../packages/core/src/types';
 import { LocalStore, atomicWrite, type StoredDesign } from './store';
 import { HttpError, clientSchema, decodePng, idSchema, mutationSchema, nameSchema, sizeSchema, validPng, validateRecord, validatedMaster, validateWorkspace } from './validation';
 import { runExportWorker } from './export-runner';
@@ -68,7 +68,7 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
       if (!available.has(state.document.profileId)) throw new HttpError(409, 'A profile used by a saved design cannot be removed');
       for (const version of state.versions) if (!available.has((await store.snapshot(state.document.id, version.id, state)).document.profileId)) throw new HttpError(409, 'A profile used by a retained version cannot be removed');
     }
-    await store.saveWorkspace(settings); return settings;
+    return store.saveWorkspace(settings);
   }));
 
   async function designSummaries(request: FastifyRequest, archived: boolean): Promise<DesignSummary[]> {
@@ -79,14 +79,16 @@ export async function createApp(options: AppOptions): Promise<FastifyInstance> {
   }
   app.get('/api/designs', request => designSummaries(request, false));
   app.get('/api/archived', request => designSummaries(request, true));
-  app.post('/api/designs', async request => {
+  // Base64 source (110 MB), raster (40 MB) and thumbnail (16 MB), plus metadata.
+  app.post('/api/designs', { bodyLimit: 224 * 1024 * 1024 }, async request => {
     const payload = z.object({ master: z.unknown(), name: nameSchema.optional(), sourcePngBase64: z.string().optional(), thumbnailPngBase64: z.string().optional() }).parse(request.body);
     const master = validatedMaster(payload.master), source = decodePng(payload.sourcePngBase64), thumbnail = decodePng(payload.thumbnailPngBase64, true);
     if (source && (source.readUInt32BE(16) !== master.source.widthPx || source.readUInt32BE(20) !== master.source.heightPx)) throw new HttpError(400, 'Source PNG dimensions do not match the master');
     return store.serial(async () => {
       const settings = await store.workspace(), id = randomUUID(), time = iso();
       const name = payload.name ?? master.name;
-      const document = validateRecord({ id, kind: 'master', name, tags: master.tags, master: { ...master, id, workspaceId: 'local-jdm', name }, profileId: settings.defaultProfileId, sizeInput: { mode: 'grid', widthPx: Math.min(600, settings.profiles.find(p => p.id === settings.defaultProfileId)!.hooks), linkAspect: true }, rules: DEFAULT_RULES, pixelOverrides: [], operations: [], revision: 1, createdAt: time, updatedAt: time }, settings);
+      const sizeInput = master.raster ? { mode: 'grid', widthPx: master.raster.width, heightPx: master.raster.height, linkAspect: false } : { mode: 'grid', widthPx: Math.min(600, settings.profiles.find(p => p.id === settings.defaultProfileId)!.hooks), linkAspect: true };
+      const document = validateRecord({ id, kind: 'master', name, tags: master.tags, master: { ...master, id, workspaceId: 'local-jdm', name }, profileId: settings.defaultProfileId, sizeInput, rules: master.raster ? DEFAULT_RASTER_RULES : DEFAULT_RULES, pixelOverrides: [], operations: [], revision: 1, createdAt: time, updatedAt: time }, settings);
       const state: StoredDesign = { document, archived: false, versions: [], exports: [], hasSource: Boolean(source), hasThumbnail: Boolean(thumbnail) };
       if (source) await atomicWrite(store.file(id, 'source'), source); if (thumbnail) await atomicWrite(store.file(id, 'thumbnail'), thumbnail);
       const initial: VersionSummary = { id: randomUUID(), version: document.master.version, note: 'Imported master', createdAt: time };

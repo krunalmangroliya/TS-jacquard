@@ -13,7 +13,10 @@ export function resolveSize(bounds: Bounds, profile: MachineProfile, input: Size
   positive(bounds.w, 'Master width'); positive(bounds.h, 'Master height');
   positive(profile.hooks, 'Hooks'); positive(profile.epi, 'EPI'); positive(profile.ppi, 'PPI');
   if (!Number.isSafeInteger(profile.hooks)) throw new Error('Hooks must be an integer');
-  const ratio = bounds.h / bounds.w * profile.ppi / profile.epi;
+  const aspectKnown = bounds.pixelAspect !== null;
+  if (aspectKnown) positive(bounds.pixelAspect ?? 1, 'Source pixel aspect');
+  const ratio = bounds.h / bounds.w * (bounds.pixelAspect ?? 1) * profile.ppi / profile.epi;
+  if (!aspectKnown && (input.mode === 'fitAcross' || input.linkAspect)) throw new Error('Enter the prepared image’s source EPI and PPI before linking proportions, or specify both pixel dimensions with aspect unlocked.');
   let width: number | undefined, height: number | undefined;
   if (input.mode === 'fitAcross') {
     positive(input.n, 'Repeat count');
@@ -37,7 +40,9 @@ export function resolveSize(bounds: Bounds, profile: MachineProfile, input: Size
   const warnings: string[] = [];
   if (width > profile.hooks) warnings.push(`Width ${width} exceeds ${profile.hooks} available hooks`);
   if (profile.hooks % width) warnings.push(`${width} does not divide ${profile.hooks} hooks evenly (${profile.hooks % width} hooks remain)`);
-  const expected = Math.round(width * ratio);
-  if (height !== expected) warnings.push(`Physical aspect differs from the master by ${(100 * (height / (width * ratio) - 1)).toFixed(1)}% vertically`);
+  if (aspectKnown) {
+    const expected = Math.round(width * ratio);
+    if (height !== expected) warnings.push(`Physical aspect differs from the master by ${(100 * (height / (width * ratio) - 1)).toFixed(1)}% vertically`);
+  } else warnings.push('Source density is unknown. Explicit dimensions are used; physical proportions cannot be compared with the source.');
   return { widthPx: width, heightPx: height, widthIn: width / profile.epi, heightIn: height / profile.ppi, warnings, suggestedWidths: profile.hooks % width ? nearestDivisors(profile.hooks, width) : [] };
 }

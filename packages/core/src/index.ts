@@ -9,3 +9,4 @@ export * from './render';
 export * from './rules';
 export * from './ops';
 export * from './materialize';
+export * from './raster';

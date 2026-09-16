@@ -1,6 +1,6 @@
 import type { Master, MachineProfile, Palette, RuleConfig, PixelOverride, SizeInput } from '../../core/src/types';
 import type { Operation } from '../../core/src/ops';
-export interface WorkspaceSettings { name:string; profiles:MachineProfile[]; defaultProfileId:string; defaultPalette:Palette }
+export interface WorkspaceSettings { name:string; profiles:MachineProfile[]; defaultProfileId:string; defaultPalette:Palette; machineProfileCatalogVersion?:number }
 export interface DesignRecord {
   id:string; kind:'master'|'size'; masterId?:string; baseMasterVersion?:number;
   name:string; tags:string[]; master:Master; profileId:string; sizeInput:SizeInput;
@@ -19,4 +19,4 @@ export type EditorAction =
   | {type:'rules';rules:RuleConfig}
   | {type:'size';sizeInput:SizeInput;profileId:string}
   | {type:'metadata';name:string;tags:string[]}
-  | {type:'replace';master:Master;operations?:Operation[];baseMasterVersion?:number};
+  | {type:'replace';master:Master;operations?:Operation[];baseMasterVersion?:number;rules?:RuleConfig;pixelOverrides?:PixelOverride[]};

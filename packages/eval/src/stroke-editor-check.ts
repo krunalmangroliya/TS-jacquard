@@ -73,7 +73,7 @@ export async function verifyStrokeEditorSmoke(directory: string, executablePath 
     assert.deepEqual(edited.geometry.nodes, master.geometry.nodes); assert.deepEqual(edited.geometry.faceColors, master.geometry.faceColors); assert.deepEqual(edited.objects, master.objects);
     assert.deepEqual(Object.keys(edited.geometry.edges), Object.keys(master.geometry.edges)); assert.equal(edited.geometry.edges.editable.width, 2); assert.equal(edited.geometry.edges.editable.widthMode, 'design'); checks++;
     const actual = await download('download-bmp', 'edited.bmp'), materialized = materializeGeometry(edited);
-    const result = render(materialized.geometry, materialized.faces, edited.bounds, edited.palette, 240, 192, rules, [], edited.repeat);
+    const result = render(materialized.geometry, materialized.faces, edited.bounds, edited.palette, 240, 192, rules, [], edited.repeat, edited.raster);
     assert.deepEqual(actual, Buffer.from(encodeBmp(result.grid, 240, 192, edited.palette, DEFAULT_PROFILE))); checks++;
     const final = await state(page); assert.equal(final.topologyBuilds, 1); assert.deepEqual(errors, []); checks++;
     await page.screenshot({ path: path.join(directory, 'stroke-editor-smoke.png'), fullPage: true });

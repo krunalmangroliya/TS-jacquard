@@ -4,6 +4,9 @@ import { paletteSchema, profileSchema, ruleSchema, validateMaster } from '../../
 import { resolveSize } from '../../../packages/core/src/size';
 import { operationSchema } from '../../../packages/core/src/ops';
 import type { DesignRecord, WorkspaceSettings } from '../../../packages/app-model/src/index';
+import { MAX_MACHINE_PROFILES } from '../../../packages/app-model/src/machine-presets';
+import { MAX_COLORS } from '../../../packages/core/src/types';
+import { validateRuleConfig } from '../../../packages/core/src/rules';
 
 export class HttpError extends Error { constructor(public statusCode: number, message: string, public code = 'REQUEST_ERROR') { super(message); } }
 export const idSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/, 'Invalid ID');
@@ -18,8 +21,9 @@ export const sizeSchema = z.discriminatedUnion('mode', [
 ]);
 export const workspaceSchema = z.object({
   name: nameSchema,
-  profiles: z.array(profileSchema.extend({ id: idSchema, name: nameSchema, hooks: z.number().int().positive().max(1_000_000), epi: finitePositive.max(1_000_000), ppi: finitePositive.max(1_000_000) })).min(1).max(100),
+  profiles: z.array(profileSchema.extend({ id: idSchema, name: nameSchema, hooks: z.number().int().positive().max(1_000_000), epi: finitePositive.max(1_000_000), ppi: finitePositive.max(1_000_000) })).min(1).max(MAX_MACHINE_PROFILES),
   defaultProfileId: idSchema, defaultPalette: paletteSchema,
+  machineProfileCatalogVersion: z.number().int().nonnegative().safe().optional(),
 });
 export function validateWorkspace(value: unknown): WorkspaceSettings {
   const settings = workspaceSchema.parse(value);
@@ -32,7 +36,7 @@ const recordSchema = z.object({
   id: idSchema, kind: z.enum(['master', 'size']), masterId: idSchema.optional(), baseMasterVersion: z.number().int().positive().optional(),
   name: nameSchema, tags: z.array(z.string().trim().min(1).max(80)).max(100), master: z.unknown(),
   profileId: idSchema, sizeInput: sizeSchema, rules: ruleSchema,
-  pixelOverrides: z.array(z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), colorIndex: z.number().int().min(0).max(5) })).max(4_000_000),
+  pixelOverrides: z.array(z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(), colorIndex: z.number().int().min(0).max(MAX_COLORS - 1) })).max(4_000_000),
   operations: z.array(operationSchema).max(100_000), revision: z.number().int().positive().safe(),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
 });
@@ -42,11 +46,14 @@ export function validatedMaster(value: unknown) {
     if (!Number.isSafeInteger(master.version) || master.version >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid master version');
     if (master.bounds.w > 8192 || master.bounds.h > 8192 || master.bounds.w * master.bounds.h > 40_000_000) throw new Error('Master bounds exceed 8192 per side or 40 million pixels');
     if (master.source.widthPx > 8192 || master.source.heightPx > 8192 || master.source.widthPx * master.source.heightPx > 40_000_000) throw new Error('Source dimensions exceed the image limits');
+    if (master.raster && (master.raster.width > 8192 || master.raster.height > 8192 || master.raster.width * master.raster.height > 40_000_000)) throw new Error('Raster dimensions exceed the image limits');
     return master;
   } catch (error) { if (error instanceof z.ZodError) throw error; throw new HttpError(400, error instanceof Error ? error.message : 'Invalid master'); }
 }
 export function validateRecord(value: unknown, workspace: WorkspaceSettings): DesignRecord {
   const parsed = recordSchema.parse(value), master = validatedMaster(parsed.master);
+  try { validateRuleConfig(parsed.rules, master.palette); }
+  catch (error) { throw new HttpError(400, error instanceof Error ? error.message : 'Invalid cleanup settings'); }
   if (parsed.kind === 'size' && (!parsed.masterId || !parsed.baseMasterVersion)) throw new HttpError(400, 'A size must name its base master and version');
   if (parsed.kind === 'master' && (parsed.masterId || parsed.baseMasterVersion)) throw new HttpError(400, 'A master cannot have a parent');
   const profile = workspace.profiles.find(p => p.id === parsed.profileId);

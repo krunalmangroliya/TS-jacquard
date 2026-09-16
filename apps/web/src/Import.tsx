@@ -6,8 +6,9 @@ import { importPalette } from '../../../packages/core/src/input-preprocessing';
 import type { ImportJob, ImportResult } from './import.worker';
 import { Icon, Notice, request, rgbToHex, ScreenHeader, Spinner } from './ui';
 import './library.css';
+import ColorImageImport from './ColorImageImport';
 
-interface Props { settings: WorkspaceSettings; onCreated: (id: string) => void; onCancel: () => void }
+interface Props { settings: WorkspaceSettings; onCreated: (id: string) => void; onCancel: () => void; initialMode?: 'sketch' | 'image' }
 interface Crop { x: number; y: number; w: number; h: number }
 interface Source { file: File; url: string; width: number; height: number }
 interface Review extends ImportResult { crop: Crop; thumbnailPngBase64: string }
@@ -18,7 +19,15 @@ const presets: Record<string, { label: string; description: string; params: Part
 };
 function blobBase64(blob: Blob): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = () => reject(new Error('Could not read the selected image.')); reader.readAsDataURL(blob); }); }
 
-export default function Import({ settings, onCreated, onCancel }: Props) {
+export default function Import(props: Props) {
+  const [mode, setMode] = useState<'sketch' | 'image'>(props.initialMode ?? 'sketch'), [creating, setCreating] = useState(false);
+  return <><div className="jdm-import-modes" role="group" aria-label="Import workflow">
+    <button aria-pressed={mode === 'sketch'} disabled={creating} onClick={() => setMode('sketch')}><strong>Sketch / line art</strong><span>Trace a drawing, then fill its regions.</span></button>
+    <button aria-pressed={mode === 'image'} disabled={creating} onClick={() => setMode('image')}><strong>Direct color image</strong><span>Upload BMP, PNG or JPG with colors already filled.</span></button>
+  </div>{mode === 'image' ? <ColorImageImport onCreated={props.onCreated} onCancel={props.onCancel} onCreating={setCreating} /> : <SketchImport {...props} onCreating={setCreating} />}</>;
+}
+
+function SketchImport({ settings, onCreated, onCancel, onCreating }: Props & { onCreating: (creating: boolean) => void }) {
   const previewClip = useId();
   const [source, setSource] = useState<Source | null>(null), [name, setName] = useState(''), [error, setError] = useState('');
   const [cropEnabled, setCropEnabled] = useState(false), [crop, setCrop] = useState<Crop>({ x: 0, y: 0, w: 8, h: 8 });
@@ -27,6 +36,7 @@ export default function Import({ settings, onCreated, onCancel }: Props) {
   const startingColors = importPalette(settings.defaultPalette, inputMode);
   const [review, setReview] = useState<Review | null>(null), [busy, setBusy] = useState(false), [stage, setStage] = useState(''), [creating, setCreating] = useState(false), [reading, setReading] = useState(false), [dragging, setDragging] = useState(false), [view, setView] = useState<'source' | 'trace'>('trace');
   const fileInput = useRef<HTMLInputElement>(null), workerRef = useRef<Worker | null>(null), generation = useRef(0), sourceUrl = useRef('');
+  useEffect(() => { onCreating(creating); }, [creating, onCreating]);
   function cancelTrace() { generation.current++; workerRef.current?.terminate(); workerRef.current = null; setBusy(false); setStage(''); }
   useEffect(() => { cancelTrace(); setReview(null); }, [source?.url, cropEnabled, crop.x, crop.y, crop.w, crop.h, automatic, threshold, invert, preset, repeat, gap, inputMode]);
   useEffect(() => () => { generation.current++; workerRef.current?.terminate(); if (sourceUrl.current) URL.revokeObjectURL(sourceUrl.current); }, []);

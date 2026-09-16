@@ -18,6 +18,8 @@ export interface EditorRender {
   grid:Uint8Array; changedPixelsMask:Uint8Array;
   widthPx:number; heightPx:number; widthIn:number; heightIn:number; epi:number; ppi:number;
   preview:boolean; renderMs:number; report:Omit<RenderReport,'changedPixelsMask'>;
+  /** Exact full-resolution source counts for a raster master, never preview estimates. */
+  sourceColorPixelCounts?:number[];
 }
 export interface EditorGeometry { paths:Record<string,Vec2[]>; faces:Face[] }
 export interface EditorState {

@@ -21,7 +21,7 @@ function applySize(width: number, height: number): void {
   widthPx = size.widthPx; heightPx = size.heightPx; sizeWarnings = size.warnings;
 }
 function preview(): void {
-  const result = render(cached.geometry, cached.faces, master.bounds, master.palette, widthPx, heightPx, rules, [], master.repeat);
+  const result = render(cached.geometry, cached.faces, master.bounds, master.palette, widthPx, heightPx, rules, [], master.repeat, master.raster);
   grid = result.grid;
   const copy = grid.slice();
   scope.postMessage({ type: 'preview', revision, widthPx, heightPx, grid: copy.buffer, warnings: [...cached.warnings, ...sizeWarnings, ...result.report.warnings], topologyBuilds }, [copy.buffer]);

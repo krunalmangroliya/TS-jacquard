@@ -1,7 +1,9 @@
 import type { Master, Vec2, Palette, FaceColor, Edge, Node, Face, BezierSegment, DesignObject } from './types';
+import { MAX_COLORS } from './types';
 import { buildPlanarMap, faceAt, resolveFaceColors, trackFaces } from './topology';
 import { geometrySchema, paletteSchema, validateMaster } from './schemas';
 import { z } from 'zod';
+import { remapRaster, validateRasterPalette } from './raster';
 
 /** Serializable deterministic edits shared by the CLI and interactive worker. */
 export type Operation =
@@ -30,7 +32,7 @@ export interface OperationCache {
   deferTopology?:boolean;
 }
 export interface OperationResult { master:Master; warnings:string[]; faces?:Face[]; geometryChanged:boolean }
-const operationId=z.string().min(1).max(1000),operationPoint=z.object({x:z.number().finite(),y:z.number().finite()}),operationColor=z.number().int().min(0).max(5);
+const operationId=z.string().min(1).max(1000),operationPoint=z.object({x:z.number().finite(),y:z.number().finite()}),operationColor=z.number().int().min(0).max(MAX_COLORS-1);
 const operationIds=z.array(operationId).min(1).max(100000);
 export const operationSchema=z.discriminatedUnion('t',[
   z.object({t:z.literal('setFaceColor'),faceId:operationId,ref:operationPoint,colorIndex:operationColor.nullable()}),
@@ -140,7 +142,8 @@ function cachedAppearanceOperation(master:Master,operation:Operation,faces:Face[
     const palette={entries:master.palette.entries.filter(entry=>entry.index!==source).map(entry=>({...entry,index:remap(entry.index)}))};
     const edges=Object.fromEntries(Object.entries(master.geometry.edges).map(([id,edge])=>[id,edge.colorIndex===undefined?edge:{...edge,colorIndex:remap(edge.colorIndex)}]));
     const faceColors=Object.fromEntries(Object.entries(master.geometry.faceColors).map(([id,color])=>[id,color.colorIndex===null?color:{...color,colorIndex:remap(color.colorIndex)}]));
-    return {...master,palette,geometry:{...master.geometry,edges,faceColors}};
+    const raster=master.raster?remapRaster(master.raster,master.palette.entries.map(entry=>remap(entry.index))):undefined;
+    return {...master,palette,...raster?{raster}:{},geometry:{...master.geometry,edges,faceColors}};
   }
   if(operation.t==='setStrokeVisibility')return setStrokeVisibility(master,operation.edgeIds,operation.hidden);
   if(operation.t==='setFaceColor'&&faces){
@@ -166,6 +169,7 @@ function cachedAppearanceOperation(master:Master,operation:Operation,faces:Face[
     if(palette.entries.some((entry,i)=>entry.index!==i))throw new Error('Palette indices must be contiguous');
     for(const edge of Object.values(master.geometry.edges))if(edge.colorIndex!==undefined)colorValid(next,edge.colorIndex);
     for(const color of Object.values(master.geometry.faceColors))colorValid(next,color.colorIndex);
+    if(master.raster)validateRasterPalette(master.raster,palette);
     return next;
   }
   if(operation.t==='setObjectFlags'){

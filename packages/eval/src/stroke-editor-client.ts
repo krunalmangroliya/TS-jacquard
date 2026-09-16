@@ -146,7 +146,7 @@ worker.onmessage = ({ data }) => {
   if (data.type === 'error') { busy = false; setStatus(data.message, true); refreshButtons(); }
 };
 worker.onerror = event => { busy = false; setStatus(`Could not finish the preview: ${event.message}`, true); refreshButtons(); };
-for (const entry of config.palette.entries.slice(0, 6)) { const swatch = document.createElement('div'); swatch.className = 'swatch'; const color = document.createElement('span'); color.style.backgroundColor = `rgb(${entry.exportRgb.join(',')})`; swatch.append(color, document.createTextNode(`${entry.index} · ${entry.name}`)); element('swatches').append(swatch); }
+for (const entry of config.palette.entries) { const swatch = document.createElement('div'); swatch.className = 'swatch'; const color = document.createElement('span'); color.style.backgroundColor = `rgb(${entry.exportRgb.join(',')})`; swatch.append(color, document.createTextNode(`${entry.index} · ${entry.name}`)); element('swatches').append(swatch); }
 element('hide-stroke').onclick = () => visibility(true); element('restore-stroke').onclick = () => visibility(false);
 element('undo').onclick = undo; element('redo').onclick = redo; element('download-master').onclick = () => download('master'); element('download-bmp').onclick = () => download('bmp');
 element('fit').onclick = fit; element('zoom-in').onclick = () => zoomAt(1.4); element('zoom-out').onclick = () => zoomAt(1 / 1.4); hiddenToggle.onchange = draw;

@@ -5,6 +5,20 @@ import { encodePng } from './png';
 import type { Palette } from './types';
 const palette: Palette = { entries: [[255,255,255], [255,0,0], [0,0,0]].map((rgb, index) => ({ index, name: String(index), displayRgb: rgb as [number,number,number], exportRgb: rgb as [number,number,number] })) };
 describe('indexed output interoperability', () => {
+  it.each([7, 256])('preserves all %i palette colors in 8-bit BMP pixel rows and RGB table', count => {
+    const fullPalette: Palette = { entries: Array.from({ length: count }, (_, index) => ({ index, name: String(index), displayRgb: [index, 255 - index, (index * 7) % 256], exportRgb: [index, 255 - index, (index * 7) % 256] })) };
+    const width = count + 1, height = 3, grid = Uint8Array.from({ length: width * height }, (_, p) => (p * 17) % count);
+    const bytes = encodeBmp(grid, width, height, fullPalette, { epi: 96, ppi: 52 }), view = new DataView(bytes.buffer);
+    expect(view.getUint16(28, true)).toBe(8); expect(view.getUint32(30, true)).toBe(0);
+    expect(view.getUint32(46, true)).toBe(256);
+    const offset = view.getUint32(10, true), stride = Math.ceil(width / 4) * 4;
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      const index = bytes[offset + (height - 1 - y) * stride + x], table = 54 + index * 4;
+      expect(index).toBe(grid[y * width + x]);
+      expect([bytes[table + 2], bytes[table + 1], bytes[table]]).toEqual(fullPalette.entries[index].exportRgb);
+    }
+    expect(new Set(grid).size).toBe(count);
+  });
   it('writes hand-verified BMP headers, palette bytes and bottom-up rows', () => {
     const bytes = encodeBmp(new Uint8Array([0,0,1,1,0,2,2,1,2,2,2,2]), 4, 3, palette, { epi: 60, ppi: 48 });
     const v = new DataView(bytes.buffer);

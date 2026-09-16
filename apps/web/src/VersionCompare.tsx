@@ -1,6 +1,7 @@
 import {useEffect,useRef,useState} from 'react';
 import type {DesignRecord,WorkspaceSettings} from '../../../packages/app-model/src/index';
 import type {EditorRender,EditorState} from './editor-protocol';
+import {displayPixelAspect} from './source-aspect';
 
 function DesignImage({render,document}:{render:EditorRender;document:DesignRecord}){
   const ref=useRef<HTMLCanvasElement>(null);
@@ -13,8 +14,10 @@ function DesignImage({render,document}:{render:EditorRender;document:DesignRecor
     }
     canvas.getContext('2d')!.putImageData(new ImageData(rgba,canvas.width,canvas.height),0,0);
   },[render,document.master.palette,document.kind]);
-  const ratio=render.widthIn/render.heightIn;
-  return <><div className="comparison-artboard" style={{aspectRatio:String(ratio),width:'100%',maxWidth:`calc(62vh * ${ratio})`,margin:'0 auto'}}><canvas ref={ref} style={{display:'block',width:'100%',height:'100%',maxHeight:'none',objectFit:'fill',imageRendering:'pixelated'}}/></div><p className="muted">{render.widthPx} × {render.heightPx} pixels · {render.widthIn.toFixed(2)} × {render.heightIn.toFixed(2)} in</p></>;
+  const rasterMaster=document.kind==='master'&&!!document.master.raster,density=rasterMaster?document.master.source.interpretation?.density:undefined;
+  const ratio=document.master.raster?render.widthPx/(render.heightPx*(rasterMaster?displayPixelAspect(document.master,document.kind,render,true):1)):render.widthIn/render.heightIn;
+  const dimensions=rasterMaster?density?`${(document.master.raster!.width/density.epi).toFixed(2)} × ${(document.master.raster!.height/density.ppi).toFixed(2)} in at source density`:'Source pixel preview':`${render.widthIn.toFixed(2)} × ${render.heightIn.toFixed(2)} in`;
+  return <><div className="comparison-artboard" style={{aspectRatio:String(ratio),width:'100%',maxWidth:`calc(62vh * ${ratio})`,margin:'0 auto'}}><canvas ref={ref} style={{display:'block',width:'100%',height:'100%',maxHeight:'none',objectFit:'fill',imageRendering:'pixelated'}}/></div><p className="muted">{render.widthPx} × {render.heightPx} {rasterMaster?'preview pixels':'pixels'} · {dimensions}</p></>;
 }
 
 export default function Compare({previous,current,settings,previousLabel='Selected version'}:{previous:DesignRecord;current:EditorState;settings:WorkspaceSettings;previousLabel?:string}){

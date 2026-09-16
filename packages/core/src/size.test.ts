@@ -15,4 +15,28 @@ describe('loom dimensions', () => {
     expect(() => resolveSize(bounds, DEFAULT_PROFILE, { mode: 'grid', widthPx: 40000001, heightPx: 1, linkAspect: false })).toThrow();
     expect(resolveSize(bounds, DEFAULT_PROFILE, { mode: 'grid', widthPx: 300, heightPx: 200, linkAspect: false }).heightPx).toBe(200);
   });
+  it('uses confirmed source pixel aspect exactly once for a prepared loom grid', () => {
+    const prepared = { w: 1478, h: 384, pixelAspect: 200 / 76 }, sourceProfile = { ...DEFAULT_PROFILE, epi: 200, ppi: 76 };
+    expect(resolveSize(prepared, sourceProfile, { mode: 'grid', widthPx: 1478, linkAspect: true })).toMatchObject({ widthPx: 1478, heightPx: 384 });
+    expect(resolveSize(prepared, sourceProfile, { mode: 'grid', heightPx: 384, linkAspect: true })).toMatchObject({ widthPx: 1478, heightPx: 384 });
+    expect(resolveSize(prepared, { ...DEFAULT_PROFILE, epi: 96, ppi: 52 }, { mode: 'grid', widthPx: 1478, linkAspect: true }).heightPx).toBe(547);
+    expect(resolveSize(prepared, sourceProfile, { mode: 'physical', unit: 'in', width: 7.39, linkAspect: true })).toMatchObject({ widthPx: 1478, heightPx: 384 });
+  });
+  it('retains legacy artwork dimensions and allows an explicit square-pixel interpretation', () => {
+    const input = { mode: 'grid', widthPx: 1478, linkAspect: true } as const;
+    expect(resolveSize(bounds, DEFAULT_PROFILE, input)).toEqual(resolveSize({ ...bounds, pixelAspect: 1 }, DEFAULT_PROFILE, input));
+  });
+  it('keeps unknown-density prepared grids explicit and does not invent aspect warnings', () => {
+    const prepared = { w: 1478, h: 384, pixelAspect: null };
+    const explicit = resolveSize(prepared, DEFAULT_PROFILE, { mode: 'grid', widthPx: 1478, heightPx: 384, linkAspect: false });
+    expect(explicit).toMatchObject({ widthPx: 1478, heightPx: 384 });
+    expect(explicit.warnings.some(warning => warning.includes('differs from the master'))).toBe(false);
+    expect(explicit.warnings.some(warning => warning.includes('Source density is unknown'))).toBe(true);
+    expect(() => resolveSize(prepared, DEFAULT_PROFILE, { mode: 'grid', widthPx: 1478, linkAspect: true })).toThrow('source EPI and PPI');
+    expect(() => resolveSize(prepared, DEFAULT_PROFILE, { mode: 'physical', unit: 'in', width: 7.39, linkAspect: true })).toThrow('source EPI and PPI');
+    expect(() => resolveSize(prepared, DEFAULT_PROFILE, { mode: 'fitAcross', n: 2 })).toThrow('source EPI and PPI');
+  });
+  it('rejects invalid physical source pixel aspects', () => {
+    for (const pixelAspect of [0, -1, NaN, Infinity]) expect(() => resolveSize({ ...bounds, pixelAspect }, DEFAULT_PROFILE, { mode: 'grid', widthPx: 300, heightPx: 200, linkAspect: false })).toThrow('Source pixel aspect');
+  });
 });

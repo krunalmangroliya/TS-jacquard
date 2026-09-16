@@ -1,10 +1,12 @@
 import type { DesignRecord, EditorAction } from '../../../packages/app-model/src/index';
-import type { Face, FaceColor, Geometry, MachineProfile, Master } from '../../../packages/core/src/types';
+import type { Face, FaceColor, Geometry, IndexedRaster, MachineProfile, Master } from '../../../packages/core/src/types';
 import { applyOperation, validateOperation, type Operation } from '../../../packages/core/src/ops';
 import { buildPlanarMap, faceAt, flattenEdge, resolveFaceColors, trackFaces } from '../../../packages/core/src/topology';
 import { profileSchema, ruleSchema, validateMaster } from '../../../packages/core/src/schemas';
 import { resolveSize } from '../../../packages/core/src/size';
 import { render } from '../../../packages/core/src/render';
+import { decodeRaster } from '../../../packages/core/src/raster';
+import { validateRuleConfig } from '../../../packages/core/src/rules';
 import { encodeBmp } from '../../../packages/core/src/bmp';
 import { encodePng } from '../../../packages/core/src/png';
 import type { EditorGeometry, EditorReply, EditorRequest, EditorState, EditorCommit } from './editor-protocol';
@@ -82,6 +84,7 @@ export class EditorEngine {
   private pendingWarnings:string[]=[];
   private visibleParents=new Map<string,string[]>();
   private lastRequestId=-1;
+  private sourceCountCache?:{raster:IndexedRaster;paletteLength:number;counts:number[]};
 
   private current():DesignRecord {if(!this.document||!this.profile)throw new Error('Open a design before editing');return this.document;}
   private rememberProfile(value:MachineProfile):void {const profile=profileSchema.parse(value);this.profile=profile;this.profiles=new Map(this.profiles).set(profile.id,profile);}
@@ -109,20 +112,34 @@ export class EditorEngine {
     this.visibleGeometry={...master.geometry,edges,faceColors};
   }
   private resolvedSize(forExport=false) {
-    const document=this.current();return resolveSize(document.master.bounds,this.profile!,document.kind==='master'&&!forExport?{mode:'grid',widthPx:this.previewWidth,linkAspect:true}:document.sizeInput);
+    const document=this.current(),raster=document.master.raster;
+    const previewWidth=raster?Math.min(raster.width,this.previewWidth):this.previewWidth;
+    return resolveSize(document.master.bounds,this.profile!,document.kind==='master'&&!forExport?{mode:'grid',widthPx:previewWidth,...(raster?{heightPx:Math.max(1,Math.round(raster.height*previewWidth/raster.width)),linkAspect:false}:{linkAspect:true})}:document.sizeInput);
   }
   private rasterize(forExport=false) {
     const document=this.current(),size=this.resolvedSize(forExport),start=performance.now();
     const rules=document.kind==='master'&&!forExport?{minRegionPx:0,minThicknessPx:0,removeCheckerboard:false,connectVisibleEdges4:false}:document.rules;
-    const result=render(this.visibleGeometry!,this.visibleFaces,document.master.bounds,document.master.palette,size.widthPx,size.heightPx,rules,document.kind==='size'?document.pixelOverrides:[],document.master.repeat);
+    const result=render(this.visibleGeometry!,this.visibleFaces,document.master.bounds,document.master.palette,size.widthPx,size.heightPx,rules,document.kind==='size'?document.pixelOverrides:[],document.master.repeat,document.master.raster);
     return {result,size,renderMs:performance.now()-start};
+  }
+  private sourceColorPixelCounts():number[]|undefined {
+    const document=this.current(),raster=document.master.raster,paletteLength=document.master.palette.entries.length;
+    if(document.kind!=='master'||!raster){this.sourceCountCache=undefined;return;}
+    if(this.sourceCountCache?.raster!==raster||this.sourceCountCache.paletteLength!==paletteLength){
+      const counts=Array<number>(paletteLength).fill(0);
+      for(const index of decodeRaster(raster))counts[index]++;
+      // Keep only the histogram and the current immutable raster reference, not a decoded buffer.
+      this.sourceCountCache={raster,paletteLength,counts};
+    }
+    return [...this.sourceCountCache.counts];
   }
   private state(type:'ready'|'state',requestId:number,warnings:string[]=[]):EditorState|EditorCommit {
     if(this.interactive)return {type:'committed',requestId,patch:this.interactivePatch,editSequence:this.editSequence,canUndo:!!this.past.length,canRedo:!!this.future.length,warnings,geometryChanged:this.topologyPending,stats:{nodes:Object.keys(this.current().master.geometry.nodes).length,edges:Object.keys(this.current().master.geometry.edges).length,faces:this.visibleFaces.filter(face=>face.outer!==null).length,objects:this.current().master.objects.length}};
     this.refreshAppearance();const {result,size,renderMs}=this.rasterize();const {changedPixelsMask,...report}=result.report;
+    const sourceColorPixelCounts=this.sourceColorPixelCounts();
     const reply:EditorState={type,requestId,document:this.current(),editSequence:this.editSequence,canUndo:!!this.past.length,canRedo:!!this.future.length,
       warnings:[...new Set([...warnings,...this.topologyWarnings,...size.warnings,...report.warnings])],
-      render:{grid:result.grid,changedPixelsMask,...size,epi:this.profile!.epi,ppi:this.profile!.ppi,preview:this.current().kind==='master',renderMs,report},
+      render:{grid:result.grid,changedPixelsMask,...size,epi:this.profile!.epi,ppi:this.profile!.ppi,preview:this.current().kind==='master',renderMs,report,...(sourceColorPixelCounts?{sourceColorPixelCounts}:{})},
       stats:{nodes:Object.keys(this.current().master.geometry.nodes).length,edges:Object.keys(this.current().master.geometry.edges).length,faces:this.visibleFaces.filter(face=>face.outer!==null).length,objects:this.current().master.objects.length}};
     if(this.geometryDirty){reply.geometry=this.geometry;this.geometryDirty=false;}return reply;
   }
@@ -131,6 +148,7 @@ export class EditorEngine {
     const master=validateMaster(document.master),rules=ruleSchema.parse(document.rules),operations=(document.operations??[]).map(validateOperation);
     if(!Array.isArray(document.tags)||document.tags.some(tag=>typeof tag!=='string')||typeof document.name!=='string')throw new Error('Invalid design metadata');
     const pixelOverrides=(document.pixelOverrides??[]).map(pixel=>{if(!Number.isInteger(pixel.x)||!Number.isInteger(pixel.y)||pixel.x<0||pixel.y<0||!Number.isInteger(pixel.colorIndex)||pixel.colorIndex<0||pixel.colorIndex>=master.palette.entries.length)throw new Error('Invalid pixel override');return {...pixel};});
+    validateRuleConfig(rules,master.palette);
     return {...document,master,rules,operations,pixelOverrides,tags:[...document.tags]};
   }
   private action(action:EditorAction):{geometryChanged:boolean;visibilityChanged:boolean;warnings:string[]} {
@@ -155,6 +173,9 @@ export class EditorEngine {
           const remap=(index:number)=>{const replaced=index===operation.sourceIndex?operation.targetIndex:index;return replaced>operation.sourceIndex?replaced-1:replaced;};
           document.pixelOverrides=document.pixelOverrides.map(pixel=>({...pixel,colorIndex:remap(pixel.colorIndex)}));
           if(document.rules.protectedColorIndices)document.rules={...document.rules,protectedColorIndices:[...new Set(document.rules.protectedColorIndices.map(remap))].sort((a,b)=>a-b)};
+          if(document.rules.cleanupColorIndices)document.rules={...document.rules,cleanupColorIndices:[...new Set(document.rules.cleanupColorIndices.map(remap))].sort((a,b)=>a-b)};
+          if(document.rules.outlineColorIndex!==undefined)document.rules={...document.rules,outlineColorIndex:remap(document.rules.outlineColorIndex)};
+          if(document.rules.repairColorIndices)document.rules={...document.rules,repairColorIndices:[...new Set(document.rules.repairColorIndices.map(remap))].sort((a,b)=>a-b)};
         }
         if(geometryChanged){if(this.interactive&&!applied.faces)this.topologyPending=true;else this.prepareGeometry(applied.faces);}else if(visibilityChanged)this.prepareGeometry(this.fullFaces,false);
         break;
@@ -177,11 +198,17 @@ export class EditorEngine {
         const master=validateMaster(action.master);document.master={...master,version:document.master.version,updatedAt:document.master.updatedAt};
         if(action.operations)document.operations=action.operations.map(validateOperation);
         if(action.baseMasterVersion!==undefined)document.baseMasterVersion=action.baseMasterVersion;
+        if(action.rules!==undefined)document.rules=ruleSchema.parse(action.rules);
+        if(action.pixelOverrides!==undefined)document.pixelOverrides=copy(action.pixelOverrides);
+        this.validateDocument(document);
+        const nextSize=this.resolvedSize();
+        if(document.pixelOverrides.some(pixel=>pixel.x>=nextSize.widthPx||pixel.y>=nextSize.heightPx))throw new Error('Updated size does not contain all pixel corrections. Keep the existing size or create a new size from the updated master.');
         if(document.kind==='master'){document.name=master.name;document.tags=[...master.tags];}
         geometryChanged=true;this.prepareGeometry();break;
       }
       default:throw new Error('Unsupported editor action');
     }
+    validateRuleConfig(document.rules,document.master.palette);
     return {geometryChanged,visibilityChanged,warnings};
   }
   handle(request:EditorRequest):EditorReply {
@@ -248,6 +275,8 @@ export class EditorEngine {
     }}
     const current=this.current();this.document={...state.document,revision:current.revision,updatedAt:current.updatedAt,master:{...state.document.master,version:current.master.version,updatedAt:current.master.updatedAt}};
     Object.assign(this,cache);this.topologyPending=false;this.restoreFaceColors=undefined;this.pendingWarnings=[];this.geometryDirty=false;
+    const raster=this.document.master.raster,counts=state.render.sourceColorPixelCounts;
+    this.sourceCountCache=this.document.kind==='master'&&raster&&counts?{raster,paletteLength:this.document.master.palette.entries.length,counts:[...counts]}:undefined;
     state.document=this.document;state.editSequence=this.editSequence;state.canUndo=!!this.past.length;state.canRedo=!!this.future.length;
   }
 

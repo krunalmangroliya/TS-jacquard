@@ -3,7 +3,7 @@ import { MAX_COLORS } from './types';
 
 export function validateGrid(grid: Uint8Array, width: number, height: number, palette: Palette): void {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width * height > 40_000_000 || grid.length !== width * height) throw new Error('Invalid grid dimensions or pixel count');
-  if (palette.entries.length < 1 || palette.entries.length > MAX_COLORS || palette.entries.some((e, i) => e.index !== i || e.exportRgb.length !== 3 || e.exportRgb.some(c => !Number.isInteger(c) || c < 0 || c > 255))) throw new Error('Invalid palette: use 1–6 contiguous colors');
+  if (palette.entries.length < 1 || palette.entries.length > MAX_COLORS || palette.entries.some((e, i) => e.index !== i || e.exportRgb.length !== 3 || e.exportRgb.some(c => !Number.isInteger(c) || c < 0 || c > 255))) throw new Error(`Invalid palette: use 1–${MAX_COLORS} contiguous colors`);
   for (const value of grid) if (value >= palette.entries.length) throw new Error(`Pixel index ${value} is not in the palette`);
 }
 /** Uncompressed 8-bit Windows BMP. Pixel values are palette indices, never RGB quantization. */

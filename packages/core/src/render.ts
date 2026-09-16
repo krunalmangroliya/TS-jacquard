@@ -1,7 +1,10 @@
 import { faceAt, flattenEdge } from './topology';
-import type { Bounds, Face, Geometry, Palette, PixelOverride, RenderResult, Repeat, RuleConfig, Vec2 } from './types';
+import type { Bounds, Face, Geometry, IndexedRaster, Palette, PixelOverride, RenderResult, Repeat, RuleConfig, Vec2 } from './types';
 import { DEFAULT_RULES } from './types';
-import { applyRules, validateRuleGrid } from './rules';
+import { applyRules, cleanupScopeMask, RULE_BITS, validateRuleConfig, validateRuleGrid } from './rules';
+import { decodeRaster } from './raster';
+import { RasterOutlineEvidence } from './raster-outline';
+import { ConservativeRasterOutline } from './raster-outline-v2';
 
 const FIXED = 256;
 const compareIds = (a: { id: string }, b: { id: string }): number => a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -11,11 +14,28 @@ const area = (ring: Vec2[]): number => ring.reduce((sum, p, i) => { const q = ri
 export function render(
   geometry: Geometry, faces: Face[], bounds: Bounds, palette: Palette, widthPx: number, heightPx: number,
   rules: RuleConfig = DEFAULT_RULES, overrides: PixelOverride[] = [], repeat: Repeat = { type: 'straight' },
+  raster?: IndexedRaster,
 ): RenderResult {
   if (!Number.isFinite(bounds.w) || !Number.isFinite(bounds.h) || bounds.w <= 0 || bounds.h <= 0) throw new Error('Master bounds must be positive finite numbers.');
   if (!Number.isSafeInteger(widthPx) || !Number.isSafeInteger(heightPx) || widthPx < 1 || heightPx < 1 || widthPx * heightPx > 100_000_000) throw new Error('Output size must be positive integers with at most 100 million pixels.');
   let grid: Uint8Array = new Uint8Array(widthPx * heightPx);
   validateRuleGrid(grid, widthPx, heightPx, palette);
+  validateRuleConfig(rules, palette);
+  let outlineEvidence: RasterOutlineEvidence | undefined;
+  if (raster) {
+    const source = decodeRaster(raster);
+    validateRuleGrid(source, raster.width, raster.height, palette);
+    const columns = new Int32Array(widthPx);
+    for (let x = 0; x < widthPx; x++) columns[x] = Math.min(raster.width - 1, Math.floor((x + 0.5) * raster.width / widthPx));
+    for (let y = 0; y < heightPx; y++) {
+      const row = Math.min(raster.height - 1, Math.floor((y + 0.5) * raster.height / heightPx)) * raster.width;
+      for (let x = 0; x < widthPx; x++) grid[y * widthPx + x] = source[row + columns[x]];
+    }
+    if (rules.rasterResize === 'preserve-outline' || rules.repairOutlineGaps) {
+      const Evidence = rules.outlineAlgorithm === 'conservative' ? ConservativeRasterOutline : RasterOutlineEvidence;
+      outlineEvidence = new Evidence(source, raster.width, raster.height, widthPx, heightPx, rules.outlineColorIndex ?? rules.repairColorIndices![0]);
+    }
+  }
   const warnings: string[] = [], smallFacesRemoved: Vec2[] = [], visibleMask = new Uint8Array(grid.length), overrideMask = new Uint8Array(grid.length);
   const omittedFaceKeys = new Set<string>();
   const markOmittedDetail = (point: Vec2, face?: Face): void => {
@@ -52,6 +72,9 @@ export function render(
   };
   const ordered = [...faces].sort((a, b) => (a.outer ? 1 : 0) - (b.outer ? 1 : 0) || b.areaDu - a.areaDu || compareIds(a, b));
   for (const face of ordered) {
+    // The image supplies the ground and unassigned areas. Explicit vector fills
+    // and strokes can still be drawn over the imported pixels.
+    if (raster && (!face.outer || face.seamGroup === 'ground' || (!seamColors.has(face.seamGroup ?? '') && geometry.faceColors[face.id]?.colorIndex == null))) continue;
     const color = faceColor(face);
     if (!face.outer) { grid.fill(color); continue; }
     const outer = face.outer.map(transform), holes = face.holes.map(ring => ring.map(transform));
@@ -130,8 +153,32 @@ export function render(
     if (!Number.isInteger(override.x) || !Number.isInteger(override.y) || override.x < 0 || override.y < 0 || override.x >= widthPx || override.y >= heightPx) continue;
     checkColor(override.colorIndex); validOverrides.push(override); overrideMask[override.y * widthPx + override.x] = 1;
   }
-  const result = applyRules(grid, widthPx, heightPx, palette, rules, visibleMask, repeat, overrideMask);
+  const scope = cleanupScopeMask(grid, widthPx, heightPx, rules), immutable = new Uint8Array(grid.length);
+  for (let p = 0; p < immutable.length; p++) immutable[p] = visibleMask[p] || overrideMask[p] ? 1 : 0;
+  const conservative = outlineEvidence instanceof ConservativeRasterOutline ? (rules.repairColorIndices ? outlineEvidence.planColors(grid, scope, immutable, rules) : outlineEvidence.plan(grid, scope, immutable, rules)) : undefined;
+  const preserved = conservative ? conservative.preserved : rules.rasterResize === 'preserve-outline' ? outlineEvidence?.preserve(grid, scope, immutable) : undefined;
+  if (preserved) grid = preserved.grid;
+  // Both conservative passes were proposed and checked together against the
+  // untouched sample. Newly restored ink cannot create further repair evidence.
+  if (conservative?.repaired) for (let p = 0; p < grid.length; p++) if (conservative.repaired.changed[p]) grid[p] = conservative.repaired.grid[p];
+  // Preserve the legacy priority given to its chosen outline. The conservative
+  // mode obeys the user's explicit speck/thickness settings for every color;
+  // otherwise its sampled outline specks could never be cleaned.
+  // Do not use visibleMask here: that would enable unrelated vector bridging.
+  const cleanupRules = preserved && !conservative && rules.outlineColorIndex !== undefined ? { ...rules, protectedColorIndices: [...new Set([...(rules.protectedColorIndices ?? []), rules.outlineColorIndex])] } : rules;
+  const result = applyRules(grid, widthPx, heightPx, palette, cleanupRules, visibleMask, repeat, overrideMask, scope);
   grid = result.grid;
+  const repaired = conservative ? conservative.repaired : rules.repairOutlineGaps ? outlineEvidence?.repair(grid, scope, immutable, rules) : undefined;
+  if (repaired && !conservative) grid = repaired.grid;
+  for (const [name, pass] of [['preserveOutline', preserved], ['repairOutlineGaps', repaired]] as const) {
+    if (!pass) continue;
+    result.changedPixelsByRule[name] = pass.count;
+    for (let p = 0; p < grid.length; p++) if (pass.changed[p]) result.changedPixelsMask[p] |= RULE_BITS[name];
+    if (pass.skipped) warnings.push(`Skipped ${pass.skipped} outline source checks because their local patches exceed 4096 source pixels; inspect this reduction manually.`);
+  }
+  if (outlineEvidence && !outlineEvidence.shrinking) warnings.push('Outline preservation and gap repair apply when reducing both image axes or reducing one while the other stays unchanged. This size keeps ordinary nearest-neighbor sampling.');
+  if (conservative && outlineEvidence?.shrinking && repeat.type === 'straight') warnings.push('Conservative outline checks stop at image edges; inspect the repeat joins separately.');
+  if (conservative?.conflictingPixels) warnings.push(`Left ${conservative.conflictingPixels} overlapping or nearby line-color proposals unchanged; review these junctions manually.`);
   for (const override of validOverrides) grid[override.y * widthPx + override.x] = override.colorIndex;
   for (const point of result.smallRegionsRemoved) {
     const designPoint = { x: point.x / sx, y: point.y / sy };
@@ -141,8 +188,8 @@ export function render(
   if (unassignedFaces) warnings.push(`${unassignedFaces} unassigned face(s) exported as ground color 0.`);
   if (smallFacesRemoved.length) warnings.push(`${smallFacesRemoved.length} region(s) have details omitted at this size; inspect the removed-detail markers.`);
   validateRuleGrid(grid, widthPx, heightPx, palette);
-  const usedColors=new Uint8Array(palette.entries.length),colorsUsed:number[]=[];
-  for(let i=0;i<grid.length;i++)usedColors[grid[i]]=1;
-  for(let color=0;color<usedColors.length;color++)if(usedColors[color])colorsUsed.push(color);
-  return { grid, report: { unassignedFaces, changedPixelsByRule: result.changedPixelsByRule, changedPixelsMask: result.changedPixelsMask, colorsUsed, smallFacesRemoved, warnings } };
+  const colorPixelCounts = new Array<number>(palette.entries.length).fill(0), colorsUsed: number[] = [];
+  for (let i = 0; i < grid.length; i++) colorPixelCounts[grid[i]]++;
+  for (let color = 0; color < colorPixelCounts.length; color++) if (colorPixelCounts[color]) colorsUsed.push(color);
+  return { grid, report: { unassignedFaces, changedPixelsByRule: result.changedPixelsByRule, changedPixelsMask: result.changedPixelsMask, colorsUsed, colorPixelCounts, smallFacesRemoved, warnings } };
 }

@@ -2,7 +2,8 @@ import { mkdir, open, readFile, rename, readdir, unlink } from 'node:fs/promises
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { DesignRecord, ExportSummary, VersionSummary, WorkspaceSettings } from '../../../packages/app-model/src/index';
-import { DEFAULT_PALETTE, DEFAULT_PROFILE } from '../../../packages/core/src/types';
+import { DEFAULT_PALETTE } from '../../../packages/core/src/types';
+import { addMissingMachineProfiles, DEFAULT_MACHINE_PROFILE_ID, DEFAULT_MACHINE_PROFILES, MACHINE_PROFILE_CATALOG_VERSION } from '../../../packages/app-model/src/machine-presets';
 import { HttpError, idSchema, validateWorkspace } from './validation';
 
 export interface StoredDesign { document: DesignRecord; archived: boolean; versions: VersionSummary[]; exports: ExportSummary[]; hasSource?: boolean; hasThumbnail?: boolean }
@@ -33,11 +34,26 @@ export class LocalStore {
   exportFile(id: string, exportId: string, format: 'bmp' | 'png' | 'json'): string { return path.join(this.designPath(id), 'exports', `${idSchema.parse(exportId)}.${format}`); }
   async initialize(): Promise<void> {
     await mkdir(path.join(this.root, 'designs'), { recursive: true });
-    try { await this.workspace(); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; await this.saveWorkspace({ name: 'My Jacquard Studio', profiles: [DEFAULT_PROFILE], defaultProfileId: DEFAULT_PROFILE.id, defaultPalette: DEFAULT_PALETTE }); }
+    let settings: WorkspaceSettings;
+    try { settings = await this.workspace(); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await this.saveWorkspace({ name: 'My Jacquard Studio', profiles: structuredClone(DEFAULT_MACHINE_PROFILES), defaultProfileId: DEFAULT_MACHINE_PROFILE_ID, defaultPalette: DEFAULT_PALETTE });
+      return;
+    }
+    // Seed each catalog version once, so later edits and removals survive restarts.
+    if ((settings.machineProfileCatalogVersion ?? 0) < MACHINE_PROFILE_CATALOG_VERSION) await this.saveWorkspace({ ...settings, profiles: addMissingMachineProfiles(settings.profiles) });
   }
   async workspace(): Promise<WorkspaceSettings> { return validateWorkspace(JSON.parse(await readFile(path.join(this.root, 'workspace.json'), 'utf8'))); }
-  async saveWorkspace(value: WorkspaceSettings): Promise<void> { await atomicWrite(path.join(this.root, 'workspace.json'), json(value)); }
+  async saveWorkspace(value: WorkspaceSettings): Promise<WorkspaceSettings> {
+    let catalogVersion = MACHINE_PROFILE_CATALOG_VERSION;
+    try { catalogVersion = Math.max(catalogVersion, (await this.workspace()).machineProfileCatalogVersion ?? 0); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    // Migration metadata belongs to storage; older clients can omit it safely.
+    const settings = validateWorkspace({ ...value, machineProfileCatalogVersion: catalogVersion });
+    await atomicWrite(path.join(this.root, 'workspace.json'), json(settings));
+    return settings;
+  }
   async get(id: string, allowArchived = false): Promise<StoredDesign> {
     let value: StoredDesign;
     try { value = JSON.parse(await readFile(path.join(this.designPath(id), 'state.json'), 'utf8')) as StoredDesign; }
